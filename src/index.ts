@@ -1,5 +1,5 @@
-import type { Env, Order, UpgradeId } from "./types";
-import { getConfig } from "./config";
+import type { Env, Order, ScoreResult, UpgradeId } from "./types";
+import { getConfig, type Config } from "./config";
 import { NICHES } from "./niches";
 import { fetchAllNiches } from "./parser";
 import { processOrders, pickNiches, markStatus } from "./service";
@@ -16,6 +16,12 @@ import {
   sendCardWithLimit,
   flushDigest,
   alert,
+  pingUnappliedBids,
+  saveBidCard,
+  answerCallbackQuery,
+  setWebhook,
+  appliedKey,
+  bidCardKey,
 } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 
@@ -28,6 +34,26 @@ interface TickStats {
   notified: number;
   llmPass: number;
   errors: string[];
+}
+
+// Детерминированный пол бюджета: LLM может пропустить дешёвый hourly,
+// правило ниже переопределяет его вердикт после скоринга, до отправки карточки.
+function applyHourlyBudgetFloor(
+  env: Env,
+  order: Order,
+  score: ScoreResult,
+  cfg: Config,
+): void {
+  if (score.verdict !== "BID") return;
+  if (order.type !== "hourly") return;
+  if (order.budget_max >= cfg.minHourlyUsd) return;
+  score.verdict = "PASS";
+  score.reason = `бюджет ниже пола: $${Math.round(order.budget_max)}/ч < $${cfg.minHourlyUsd}/ч`;
+  logImportant(env, "llm.verdict-floor-override", {
+    id: order.id,
+    budget_max_usd: order.budget_max,
+    min_hourly_usd: cfg.minHourlyUsd,
+  });
 }
 
 export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Promise<TickStats> {
@@ -49,6 +75,12 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     await flushDigest(env);
   } catch (e) {
     console.error("flushDigest failed:", e);
+  }
+
+  try {
+    await pingUnappliedBids(env);
+  } catch (e) {
+    console.error("pingUnappliedBids failed:", e);
   }
 
   const niches = await pickNiches(env, NICHES, cfg.nichesPerTick);
@@ -103,6 +135,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         continue;
       }
 
+      applyHourlyBudgetFloor(env, order, score, cfg);
+
       await logImportant(env, "llm.verdict", {
         id: order.id,
         verdict: score.verdict,
@@ -134,7 +168,14 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       }
 
       const card = formatOrderCard(order, score, bidText, removedUpgrades);
-      await sendCardWithLimit(env, card, { title: order.title });
+      const keyboard =
+        score.verdict === "BID"
+          ? { inline_keyboard: [[{ text: "Откликнулся ✅", callback_data: `applied:${order.id}` }]] }
+          : undefined;
+      await sendCardWithLimit(env, card, { title: order.title }, keyboard);
+      if (score.verdict === "BID") {
+        await saveBidCard(env, order);
+      }
       await markStatus(env, order.id, "notified");
       stats.notified += 1;
       await logImportant(env, "order.notified", {
@@ -239,6 +280,7 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
     if (score === null) {
       return jsonResponse({ order, score: null, reason: "scoring parse failed" });
     }
+    applyHourlyBudgetFloor(env, order, score, getConfig(env));
     let removedUpgrades: UpgradeId[] = [];
     if (score.verdict === "BID") {
       const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
@@ -272,13 +314,67 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
   }
 }
 
+interface TelegramCallbackUpdate {
+  callback_query?: {
+    id: string;
+    data?: string;
+  };
+}
+
+async function handleTgWebhook(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Not Found", { status: 404 });
+  }
+  let update: TelegramCallbackUpdate;
+  try {
+    update = (await request.json()) as TelegramCallbackUpdate;
+  } catch {
+    return new Response("ok");
+  }
+  const callback = update.callback_query;
+  if (callback?.id) {
+    if (typeof callback.data === "string" && callback.data.startsWith("applied:")) {
+      const id = Number(callback.data.slice("applied:".length));
+      if (Number.isFinite(id)) {
+        // Идемпотентно: повторное нажатие перезаписывает timestamp.
+        await env.ORDERS_KV.put(appliedKey(id), String(Date.now()), {
+          expirationTtl: 86400,
+        });
+        await env.ORDERS_KV.delete(bidCardKey(id));
+        log("tg.applied", { id });
+      }
+    }
+    ctxAnswerCallback(env, callback.id);
+  }
+  return new Response("ok");
+}
+
+function ctxAnswerCallback(env: Env, callbackId: string): void {
+  // Ответ Telegram не блокирует обработку апдейта.
+  answerCallbackQuery(env, callbackId).catch((e) =>
+    console.warn("answerCallbackQuery failed:", e),
+  );
+}
+
+async function handleSetWebhook(request: Request, env: Env): Promise<Response> {
+  const origin = new URL(request.url).origin;
+  const webhookUrl = `${origin}/tg-webhook/${env.ADMIN_TOKEN}`;
+  const result = await setWebhook(env, webhookUrl);
+  return jsonResponse({ webhookUrl, result });
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Webhook-путь авторизован токеном в URL, не заголовком.
+    if (url.pathname === `/tg-webhook/${env.ADMIN_TOKEN}`) {
+      return await handleTgWebhook(request, env);
+    }
+
     if (!isAuthorized(request, env)) {
       return new Response("Not Found", { status: 404 });
     }
-
-    const url = new URL(request.url);
 
     try {
       if (request.method === "GET" && url.pathname === "/test/kimi-models") {
@@ -290,6 +386,9 @@ export default {
       if (request.method === "POST" && url.pathname === "/test/tick") {
         const stats = await runTick(env, "manual");
         return jsonResponse(stats);
+      }
+      if (request.method === "POST" && url.pathname === "/test/set-webhook") {
+        return await handleSetWebhook(request, env);
       }
       if (request.method === "GET" && url.pathname === "/test/logs") {
         return jsonResponse(await readRing(env));

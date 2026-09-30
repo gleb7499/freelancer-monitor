@@ -17,9 +17,34 @@ function escHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function formatThousands(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function usdRange(min: number, max: number): string {
+  const lo = Math.round(min);
+  const hi = Math.round(max);
+  return lo === hi ? `$${lo}` : `$${lo}–$${hi}`;
+}
+
+function originalRange(order: Order): string {
+  const { currency_sign: sign, currency_code: code } = order;
+  const lo = formatThousands(order.budget_min_original);
+  const hi = formatThousands(order.budget_max_original);
+  const range =
+    order.budget_min_original === order.budget_max_original
+      ? `${sign}${lo}`
+      : `${sign}${lo}–${sign}${hi}`;
+  return `${range} ${code}`;
+}
+
 function budgetLine(order: Order): string {
-  const range = `$${order.budget_min}–$${order.budget_max}`;
-  return order.type === "hourly" ? `${range}/ч` : range;
+  const suffix = order.type === "hourly" ? "/ч" : "";
+  const usd = usdRange(order.budget_min, order.budget_max);
+  if (order.currency_code !== "USD") {
+    return `${originalRange(order)}${suffix} (≈${usd}${suffix})`;
+  }
+  return `${usd}${suffix}`;
 }
 
 function truncateText(text: string, maxLen: number): string {
@@ -178,14 +203,19 @@ export function formatDigest(count: number, titles: string[]): string {
   return `Ещё ${count} заказов за час:\n${shown}`;
 }
 
-export async function sendTelegram(env: Env, text: string): Promise<void> {
+export async function sendTelegram(
+  env: Env,
+  text: string,
+  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
+): Promise<void> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
-  let body = {
+  let body: Record<string, unknown> = {
     chat_id: env.TELEGRAM_CHAT_ID,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: false,
   };
+  if (replyMarkup) body.reply_markup = replyMarkup;
   let res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -235,12 +265,13 @@ export async function sendCardWithLimit(
   env: Env,
   card: string,
   meta: { title: string },
+  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
 ): Promise<"sent" | "queued"> {
   const cfg = getConfig(env);
   const key = hourKey();
   const state = await readState(env, key);
   if (state.n < cfg.maxCardsPerHour) {
-    await sendTelegram(env, card);
+    await sendTelegram(env, card, replyMarkup);
     state.n += 1;
     await env.ORDERS_KV.put(key, JSON.stringify(state), { expirationTtl: 7200 });
     return "sent";
@@ -248,6 +279,87 @@ export async function sendCardWithLimit(
   state.q.push(meta.title);
   await env.ORDERS_KV.put(key, JSON.stringify(state), { expirationTtl: 7200 });
   return "queued";
+}
+
+const BIDCARD_TTL = 86400;
+const PING_AFTER_MS = 25 * 60 * 1000;
+
+export function bidCardKey(projectId: number): string {
+  return `bidcard:${projectId}`;
+}
+
+export function appliedKey(projectId: number): string {
+  return `applied:${projectId}`;
+}
+
+export async function saveBidCard(env: Env, order: Order): Promise<void> {
+  await env.ORDERS_KV.put(
+    bidCardKey(order.id),
+    JSON.stringify({ sent_at: Date.now(), title: order.title, project_id: order.id }),
+    { expirationTtl: BIDCARD_TTL },
+  );
+}
+
+interface BidCardRecord {
+  sent_at: number;
+  title: string;
+  project_id: number;
+}
+
+export async function pingUnappliedBids(env: Env): Promise<void> {
+  const listed = await env.ORDERS_KV.list({ prefix: "bidcard:" });
+  const now = Date.now();
+  for (const entry of listed.keys) {
+    const raw = await env.ORDERS_KV.get(entry.name);
+    if (raw === null) continue;
+    let record: BidCardRecord;
+    try {
+      record = JSON.parse(raw) as BidCardRecord;
+    } catch {
+      await env.ORDERS_KV.delete(entry.name);
+      continue;
+    }
+    const projectId = record.project_id ?? Number(entry.name.split(":")[1]);
+    const applied = await env.ORDERS_KV.get(appliedKey(projectId));
+    if (applied !== null) {
+      await env.ORDERS_KV.delete(entry.name);
+      continue;
+    }
+    if (now - record.sent_at < PING_AFTER_MS) continue;
+    try {
+      await sendTelegram(env, `❗️ Не откликнулся: ${escHtml(record.title)}`);
+    } catch (err) {
+      console.warn("pingUnappliedBids send failed:", err);
+      continue;
+    }
+    await env.ORDERS_KV.delete(entry.name);
+  }
+}
+
+export async function answerCallbackQuery(env: Env, callbackId: string): Promise<void> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (err) {
+    console.warn("answerCallbackQuery failed:", err);
+  }
+}
+
+export async function setWebhook(env: Env, webhookUrl: string): Promise<unknown> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: webhookUrl }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text };
 }
 
 export async function flushDigest(env: Env): Promise<void> {

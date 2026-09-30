@@ -26,7 +26,7 @@ interface FreelancerProject {
   budget?: {
     minimum?: number;
     maximum?: number;
-    currency?: { code?: string; exchange_rate?: number };
+    currency?: { code?: string; sign?: string; exchange_rate?: number };
   };
   bid_stats?: { bid_count?: number; bid_avg?: number };
   upgrades?: Record<string, unknown>;
@@ -54,6 +54,10 @@ function usdAmount(value: number | undefined, exchangeRate: number): number {
   return Math.round(raw * exchangeRate * 100) / 100;
 }
 
+function originalAmount(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 function normalizeProject(project: FreelancerProject, nicheId: string): Order {
   const currency = project.budget?.currency;
   const exchangeRate =
@@ -76,6 +80,10 @@ function normalizeProject(project: FreelancerProject, nicheId: string): Order {
     type: project.type === "hourly" ? "hourly" : "fixed",
     budget_min: usdAmount(project.budget?.minimum, exchangeRate),
     budget_max: usdAmount(project.budget?.maximum, exchangeRate),
+    budget_min_original: originalAmount(project.budget?.minimum),
+    budget_max_original: originalAmount(project.budget?.maximum),
+    currency_code: currency?.code ?? "USD",
+    currency_sign: currency?.sign ?? "$",
     bids: project.bid_stats?.bid_count ?? 0,
     bid_avg:
       typeof project.bid_stats?.bid_avg === "number"

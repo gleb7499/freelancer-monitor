@@ -28,7 +28,7 @@ CI (GitHub Actions) deploys on every push to `main`: `npm ci` → `npm run typec
 Pipeline per cron tick (4 layers), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*`
-- `parser.ts` — Freelancer API → `Order[]` (`fetchAllNiches`)
+- `parser.ts` — Freelancer API → `Order[]` (`fetchAllNiches`); бюджеты пересчитываются в USD через `currency.exchange_rate`, оригинальные суммы и код валюты сохраняются для карточки
 - `service.ts` — KV dedup (`seen:*`), static filters (bids, budget, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min)
 - `kimi.ts` — LLM scoring, JSON-schema output, retries, validation
 - `prompts.ts` — scoring prompts; operator-facing fields (`reason`, `red_flags`, `check_manually`, `deadline_caveat`, `summary_ru`) are written in Russian by design
@@ -41,9 +41,28 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 
 `rules/` holds the original selection rules, niche list, and response skill. They are the spec that `niches.ts`, `service.ts` filters, and `prompts.ts` encode. When changing selection behavior, update the code **and** check whether `rules/` needs to reflect the new logic.
 
+## Post-scoring rules (deterministic, LLM does not decide these)
+
+- **Hourly budget floor:** after scoring, before the card — if `type === "hourly"` and `budget_max < MIN_HOURLY_USD`, the verdict is forced to `PASS` with reason «бюджет ниже пола» (`applyHourlyBudgetFloor` in `index.ts`).
+
+## Response tracking (Telegram inline button)
+
+BID cards carry an inline button «Откликнулся ✅» (`callback_data: "applied:{id}"`). Telegram callbacks arrive at the webhook path `/tg-webhook/{ADMIN_TOKEN}` (authorized by the token in the URL, not a header). Pressing writes `applied:{id}` to KV and removes the pending record.
+
+KV keys:
+
+- `bidcard:{id}` — `{sent_at, title, project_id}`, written when a BID card is sent (TTL 24h). Each tick, `pingUnappliedBids` pings orders older than 25 minutes without `applied:{id}` with one short message «Не откликнулся: {title}», then deletes the key (one ping only).
+- `applied:{id}` — confirmation timestamp (TTL 24h).
+
+The webhook must be registered once after deploy (or after the worker URL changes):
+
+```
+POST /test/set-webhook   (header X-Admin-Token) — calls Telegram setWebhook on https://<origin>/tg-webhook/<ADMIN_TOKEN>
+```
+
 ## Testing
 
-Test endpoints (all require header `X-Admin-Token`):
+Test endpoints (all require header `X-Admin-Token`, except the webhook path):
 
 ```
 GET  /test/kimi-models   — verify Kimi API key and model name

@@ -7,6 +7,10 @@ export interface Order {
   type: "fixed" | "hourly";
   budget_min: number;
   budget_max: number;
+  budget_min_original: number;
+  budget_max_original: number;
+  currency_code: string;
+  currency_sign: string;
   bids: number;
   bid_avg: number | null;
   description: string;

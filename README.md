@@ -76,6 +76,10 @@ curl -X POST -H "X-Admin-Token: $ADMIN_TOKEN" https://<worker>/test/score
 curl -X POST -H "X-Admin-Token: $ADMIN_TOKEN" https://<worker>/test/tick
 ```
 
+```
+POST /test/set-webhook   — register the Telegram webhook (required once for the "applied" button)
+```
+
 Run the tests and only then enable the `[triggers] crons` schedule in `wrangler.toml`.
 
 ## Red line
