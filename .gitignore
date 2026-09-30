@@ -1,0 +1,12 @@
+node_modules
+.dev.vars
+.wrangler
+dist
+*.log
+
+# local artifacts
+fp.json
+tmp/
+.claude/
+.agents/
+skills-lock.json

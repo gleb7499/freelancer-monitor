@@ -1,0 +1,24 @@
+name = "freelancer-monitor"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[[kv_namespaces]]
+binding = "ORDERS_KV"
+id = "b629829e784842d3a9c78f612f689974"
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+KIMI_API_BASE = "https://api.kimi.ai/coding/v1"
+KIMI_MODEL = "k3-256k"
+FREELANCER_API_BASE = "https://www.freelancer.com/api/projects/0.1"
+MAX_BIDS = "15"
+MIN_BUDGET_USD = "50"
+MIN_HOURLY_USD = "15"
+MAX_CARDS_PER_HOUR = "5"
+NICHES_PER_TICK = "4"

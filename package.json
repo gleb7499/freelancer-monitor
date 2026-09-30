@@ -1,0 +1,14 @@
+{
+  "name": "freelancer-monitor",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4",
+    "typescript": "^5",
+    "@cloudflare/workers-types": "^5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  }
+}
