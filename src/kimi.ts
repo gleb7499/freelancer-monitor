@@ -1,7 +1,7 @@
 import type { Env, Order, ScoreResult } from "./types";
 import { getConfig } from "./config";
 import {
-  SCORING_SYSTEM_PROMPT,
+  buildScoringSystemPrompt,
   SCORING_JSON_SCHEMA,
   BID_TEXT_SYSTEM_PROMPT,
   buildScoringUserMessage,
@@ -143,6 +143,15 @@ export function validateScore(s: any, order: Order): string[] {
   if (!(typeof s.deadline_caveat === "string" || s.deadline_caveat === null)) {
     errors.push("deadline_caveat must be a string or null");
   }
+  if (
+    s.weekly_limit_hours !== undefined &&
+    s.weekly_limit_hours !== null &&
+    (typeof s.weekly_limit_hours !== "number" ||
+      !Number.isInteger(s.weekly_limit_hours) ||
+      s.weekly_limit_hours <= 0)
+  ) {
+    errors.push("weekly_limit_hours must be a positive integer or null");
+  }
   const UPGRADE_IDS = ["sealed", "highlight", "sponsored"];
   if (!Array.isArray(s.take_upgrades)) {
     errors.push("take_upgrades must be an array");
@@ -160,9 +169,21 @@ export function validateScore(s: any, order: Order): string[] {
   return errors;
 }
 
-function normalizeScore(s: any): ScoreResult {
+function normalizeScore(s: any, order: Order): ScoreResult {
   const bid = s.bid_amount as number;
-  const net = Math.round((bid - Math.max(bid * 0.1, 5)) * 100) / 100;
+  // Freelancer fee: fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
+  const fee = order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5);
+  const net = Math.round((bid - fee) * 100) / 100;
+  let weeklyLimit: number | null = null;
+  if (order.type === "hourly") {
+    if (
+      typeof s.weekly_limit_hours === "number" &&
+      Number.isFinite(s.weekly_limit_hours) &&
+      s.weekly_limit_hours > 0
+    ) {
+      weeklyLimit = Math.floor(s.weekly_limit_hours);
+    }
+  }
   return {
     verdict: s.verdict,
     reason: s.reason,
@@ -172,6 +193,7 @@ function normalizeScore(s: any): ScoreResult {
     check_manually: s.check_manually,
     bid_amount: bid,
     net_amount: net,
+    weekly_limit_hours: weeklyLimit,
     delivery_days: s.delivery_days,
     deadline_caveat: s.deadline_caveat,
     take_upgrades: s.take_upgrades,
@@ -197,9 +219,15 @@ async function chatWithRetries(
   }
 }
 
-export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | null> {
+export async function scoreOrder(
+  env: Env,
+  order: Order,
+  extraRetryMessage?: string,
+  postCheck?: (score: ScoreResult) => string | null,
+): Promise<ScoreResult | null> {
+  const cfg = getConfig(env);
   const messages = [
-    { role: "system", content: SCORING_SYSTEM_PROMPT },
+    { role: "system", content: buildScoringSystemPrompt(cfg) },
     { role: "user", content: buildScoringUserMessage(order) },
   ];
   let useSchema = !jsonSchemaDegraded;
@@ -222,16 +250,27 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     parsed = undefined;
   }
   let errors = parsed === undefined ? ["response is not valid JSON"] : validateScore(parsed, order);
+  let postError: string | null = null;
   if (errors.length === 0) {
-    return normalizeScore(parsed);
+    postError = postCheck ? postCheck(normalizeScore(parsed, order)) : null;
+    if (postError === null) {
+      return normalizeScore(parsed, order);
+    }
   }
 
+  const retryReason =
+    errors.length > 0
+      ? `Validation failed: ${errors.join("; ")}.`
+      : `${postError}.`;
   const retryMessages = [
     ...messages,
     { role: "assistant", content: raw },
     {
       role: "user" as const,
-      content: `Validation failed: ${errors.join("; ")}. Return corrected JSON only.`,
+      content:
+        retryReason +
+        (extraRetryMessage ? ` ${extraRetryMessage}` : "") +
+        " Return corrected JSON only.",
     },
   ];
   try {
@@ -251,13 +290,18 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
   }
   errors = validateScore(parsed, order);
   if (errors.length > 0) return null;
-  return normalizeScore(parsed);
+  if (postCheck && postCheck(normalizeScore(parsed, order)) !== null) return null;
+  return normalizeScore(parsed, order);
 }
 
 export function buildBidMessages(
   order: Order,
   score: ScoreResult
 ): { role: string; content: string }[] {
+  const weeklyNote =
+    order.type === "hourly" && score.weekly_limit_hours !== null
+      ? `\nWeekly availability limit for this bid: ${score.weekly_limit_hours} hours/week — if the text mentions hours per week or availability, do not exceed it.`
+      : "";
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
     {
@@ -267,6 +311,7 @@ export function buildBidMessages(
         JSON.stringify(order) +
         "\n\nValidated score:\n" +
         JSON.stringify(score) +
+        weeklyNote +
         "\n\nWrite the bid text now.",
     },
   ];

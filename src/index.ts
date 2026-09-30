@@ -56,6 +56,53 @@ function applyHourlyBudgetFloor(
   });
 }
 
+// Пол ставки: ставка ниже конфиг-порога своего типа — один retry скоринга,
+// затем принудительный PASS.
+async function enforceBidFloor(
+  env: Env,
+  order: Order,
+  score: ScoreResult,
+  cfg: Config,
+): Promise<ScoreResult> {
+  if (score.verdict !== "BID") return score;
+  const threshold = order.type === "hourly" ? cfg.minHourlyUsd : cfg.minFixedUsd;
+  if (score.bid_amount >= threshold) return score;
+
+  const postCheck = (s: ScoreResult): string | null =>
+    s.verdict === "BID" && s.bid_amount < threshold
+      ? `bid_amount $${s.bid_amount} is below the floor $${threshold} for ${order.type}`
+      : null;
+  const extraRetryMessage = `Your bid_amount must be at least $${threshold} for ${order.type} projects — raise the bid (or return verdict PASS if the order is not worth bidding at that price).`;
+  let rescored: ScoreResult | null = null;
+  let retried = false;
+  try {
+    rescored = await scoreOrder(env, order, extraRetryMessage, postCheck);
+    retried = true;
+  } catch (e) {
+    console.error("enforceBidFloor retry failed:", e);
+  }
+  const finalScore = rescored ?? score;
+  if (finalScore.verdict === "BID" && finalScore.bid_amount < threshold) {
+    finalScore.verdict = "PASS";
+    finalScore.reason = `ставка ниже пола: $${finalScore.bid_amount} < $${threshold} (${order.type})`;
+    logImportant(env, "llm.bid-floor-override", {
+      id: order.id,
+      bid_amount: finalScore.bid_amount,
+      threshold,
+      type: order.type,
+      retried,
+    });
+  }
+  return finalScore;
+}
+
+// Потолок weekly limit для hourly: LLM может только снизить лимит.
+function clampWeeklyLimit(score: ScoreResult, cfg: Config): void {
+  if (score.weekly_limit_hours === null) return;
+  const cap = Math.min(cfg.weeklyLimitHours, 40);
+  score.weekly_limit_hours = Math.min(score.weekly_limit_hours, cap);
+}
+
 export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Promise<TickStats> {
   const cfg = getConfig(env);
   const startedAt = Date.now();
@@ -126,7 +173,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     }
 
     try {
-      const score = await scoreOrder(env, order);
+      let score = await scoreOrder(env, order);
 
       if (score === null) {
         const card = formatRawCard(order, "скоринг не распарсился — сырая карточка");
@@ -136,6 +183,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       }
 
       applyHourlyBudgetFloor(env, order, score, cfg);
+      score = await enforceBidFloor(env, order, score, cfg);
+      clampWeeklyLimit(score, cfg);
 
       await logImportant(env, "llm.verdict", {
         id: order.id,
@@ -276,11 +325,14 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
   }
 
   try {
-    const score = await scoreOrder(env, order);
+    let score = await scoreOrder(env, order);
     if (score === null) {
       return jsonResponse({ order, score: null, reason: "scoring parse failed" });
     }
-    applyHourlyBudgetFloor(env, order, score, getConfig(env));
+    const testCfg = getConfig(env);
+    applyHourlyBudgetFloor(env, order, score, testCfg);
+    score = await enforceBidFloor(env, order, score, testCfg);
+    clampWeeklyLimit(score, testCfg);
     let removedUpgrades: UpgradeId[] = [];
     if (score.verdict === "BID") {
       const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);

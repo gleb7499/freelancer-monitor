@@ -48,6 +48,7 @@ export interface ScoreResult {
   check_manually: string[];
   bid_amount: number;
   net_amount: number;
+  weekly_limit_hours: number | null;
   delivery_days: number;
   deadline_caveat: string | null;
   take_upgrades: UpgradeId[];
@@ -66,7 +67,9 @@ export interface Env {
   FREELANCER_API_BASE: string;
   MAX_BIDS: string;
   MIN_BUDGET_USD: string;
+  MIN_FIXED_USD: string;
   MIN_HOURLY_USD: string;
+  DEFAULT_WEEKLY_LIMIT: string;
   MAX_CARDS_PER_HOUR: string;
   NICHES_PER_TICK: string;
 }

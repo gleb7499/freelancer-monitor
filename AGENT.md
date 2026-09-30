@@ -44,6 +44,9 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 ## Post-scoring rules (deterministic, LLM does not decide these)
 
 - **Hourly budget floor:** after scoring, before the card — if `type === "hourly"` and `budget_max < MIN_HOURLY_USD`, the verdict is forced to `PASS` with reason «бюджет ниже пола» (`applyHourlyBudgetFloor` in `index.ts`).
+- **Bid floor:** if `bid_amount < MIN_HOURLY_USD` (hourly) or `< MIN_FIXED_USD` (fixed) — one re-scoring retry with a message about the floor (`enforceBidFloor`); still below after retry → forced `PASS`. Floor values are injected into the scoring system prompt as text, so changing the env vars (`MIN_HOURLY_USD`, `MIN_FIXED_USD`) changes both prompt and validation — no code edits needed.
+- **Weekly limit (hourly):** final `weekly_limit_hours = min(LLM value or DEFAULT_WEEKLY_LIMIT, DEFAULT_WEEKLY_LIMIT, 40)` (`clampWeeklyLimit`). LLM may lower it for a tight deadline, never raise it.
+- **Fee/net:** fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
 
 ## Response tracking (Telegram inline button)
 
