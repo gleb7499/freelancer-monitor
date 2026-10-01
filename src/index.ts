@@ -135,6 +135,14 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       if (score.verdict === "PASS") {
         await markStatus(env, order.id, "llm-pass", score.reason);
         stats.llmPass += 1;
+        // ВРЕМЕННО (debug): присылаем PASS-карточки для ручной проверки решений LLM.
+        // Удалить после отладки — вместе с этим блоком и пометкой в AGENT.md.
+        try {
+          const debugCard = formatOrderCard(order, score, null, []);
+          await sendTelegram(env, `🔍 DEBUG PASS\n${debugCard}`);
+        } catch (e) {
+          console.error("debug PASS card failed:", e);
+        }
         continue;
       }
 
