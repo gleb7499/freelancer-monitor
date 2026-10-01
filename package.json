@@ -8,6 +8,9 @@
     "@cloudflare/workers-types": "^5"
   },
   "scripts": {
+    "gen:rules": "node scripts/gen-rules.mjs",
+    "pretypecheck": "npm run gen:rules",
+    "predeploy": "npm run gen:rules",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy"
   }

@@ -39,7 +39,7 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 
 ## rules/ — single source of truth for selection logic
 
-`rules/` holds the original selection rules, niche list, and response skill. They are the spec that `niches.ts`, `service.ts` filters, and `prompts.ts` encode. When changing selection behavior, update the code **and** check whether `rules/` needs to reflect the new logic.
+`rules/` holds the selection rules, niche list, query syntax, and response skill. **The LLM receives their actual file content** — `scripts/gen-rules.mjs` embeds `rules/freelancer-правила-отбора.md` and `rules/отклик-скилл.md` into `src/generated/rules.ts` (gitignored), which `src/prompts.ts` injects into the scoring and bid-text system prompts. The script runs automatically via `pretypecheck`/`predeploy` npm hooks (CI included); run `npm run gen:rules` manually after a fresh clone. **Never write selection rules inline in `prompts.ts`** — the code wrapper there carries only the code contract (JSON output schema, weekly-limit default from env, upgrade pick heuristics, language rules). When changing selection behavior, edit the markdown; pricing/scoring values live in the "Ценообразование при скоринге" section of `rules/freelancer-правила-отбора.md`.
 
 ## Post-scoring rules (deterministic, LLM does not decide these)
 

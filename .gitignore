@@ -3,6 +3,7 @@ node_modules
 .wrangler
 dist
 *.log
+src/generated/
 
 # local artifacts
 fp.json

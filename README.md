@@ -35,7 +35,7 @@ src/
   kimi.ts      — scoring via Kimi API (JSON-schema, retries, validation)
   prompts.ts   — scoring prompts and bid text templates
   telegram.ts  — cards, per-hour card limit, digest, alerts
-rules/         — original selection rules and response skill (source for LLM prompts)
+rules/         — selection rules and response skill; their file content is injected into the LLM prompts at build time (scripts/gen-rules.mjs)
 ```
 
 ## Configuration
