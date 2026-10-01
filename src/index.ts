@@ -13,6 +13,7 @@ import {
 import {
   formatOrderCard,
   formatRawCard,
+  sendTelegram,
   sendCardWithLimit,
   flushDigest,
   alert,
