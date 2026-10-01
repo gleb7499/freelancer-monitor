@@ -36,6 +36,11 @@ function shouldRing(level: Level, step: string): boolean {
   return level === "warn" || level === "error" || RING_STEPS.has(step);
 }
 
+// Free tier KV — 1000 put/сутки, поэтому info-записи кольца буферизуются
+// в памяти изолята и сбрасываются одним put на тик (flushLogBuffer в конце
+// runTick). Ошибки пишутся сразу — их мало.
+const ringBuffer: RingEntry[] = [];
+
 async function writeRing(env: Env, level: Level, step: string, data?: Record<string, unknown>): Promise<void> {
   try {
     const entry: RingEntry = { ts: new Date().toISOString(), level, step };
@@ -60,6 +65,30 @@ async function writeRing(env: Env, level: Level, step: string, data?: Record<str
   }
 }
 
+export async function flushLogBuffer(env: Env): Promise<void> {
+  if (ringBuffer.length === 0) return;
+  const batch = ringBuffer.splice(0, ringBuffer.length);
+  try {
+    let ring: unknown[] = [];
+    const raw = await env.ORDERS_KV.get(RING_KEY);
+    if (raw !== null) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) ring = parsed;
+      } catch {
+        // malformed ring — start fresh
+      }
+    }
+    ring.push(...batch);
+    const trimmed = ring.slice(-RING_MAX);
+    await env.ORDERS_KV.put(RING_KEY, JSON.stringify(trimmed), {
+      expirationTtl: RING_TTL,
+    });
+  } catch (e) {
+    console.error(`logger ring flush failed: ${String(e)}`);
+  }
+}
+
 export function log(step: string, data?: Record<string, unknown>): void {
   emit("info", step, data);
 }
@@ -67,7 +96,7 @@ export function log(step: string, data?: Record<string, unknown>): void {
 export async function logImportant(env: Env, step: string, data?: Record<string, unknown>): Promise<void> {
   emit("info", step, data);
   if (shouldRing("info", step)) {
-    await writeRing(env, "info", step, data);
+    ringBuffer.push({ ts: new Date().toISOString(), level: "info", step, ...(data ?? {}) });
   }
 }
 
@@ -89,7 +118,7 @@ export async function heartbeat(env: Env, data?: Record<string, unknown>): Promi
       if (Number.isFinite(last) && now - last < BEAT_INTERVAL_MS) return;
     }
     emit("info", "heartbeat", data);
-    await writeRing(env, "info", "heartbeat", data);
+    // В ring не пишем — буфер сбросится в конце тика, heartbeat виден в console.
     await env.ORDERS_KV.put(BEAT_KEY, String(now), { expirationTtl: BEAT_TTL });
   } catch (e) {
     console.error(`logger heartbeat failed: ${String(e)}`);

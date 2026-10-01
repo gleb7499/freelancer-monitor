@@ -79,6 +79,7 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 
 ## Operational notes
 
+- **KV free tier = 1000 put / 1000 list / 100k read ops per day** (daily, not monthly). The code is shaped around this: niche rotation is time-based (no KV), the ring log buffers info entries in isolate memory and flushes once per tick with activity (`flushLogBuffer` at the end of `runTick`), unapplied-bid ping runs at most every 15 minutes, `markStatus` does not exist (status trail lives in the ring log). When adding KV writes, count them against the daily budget.
 - First deploy of a fresh clone: create KV namespace, set the 4 secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.
 - Alerts are rate-limited on purpose (1/hour) — don't bypass the limit when changing `telegram.ts`. Card sending is intentionally unlimited.

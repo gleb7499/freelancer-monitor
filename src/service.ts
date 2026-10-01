@@ -1,7 +1,6 @@
 import type { Env, Order, Niche } from "./types";
 
 const SEEN_TTL = 2592000;
-const ROTATION_KEY = "rot:cursor";
 
 interface SeenRecord {
   status: string;
@@ -94,44 +93,19 @@ export async function processOrders(
   return { fresh: freshOrders, rejectedCount, seenCount, byReason };
 }
 
-export async function pickNiches(env: Env, all: Niche[], perTick: number): Promise<Niche[]> {
+// Ротация считается от времени, без KV: 12 ниш × 4 за тик = полный проход
+// за 3 минуты, курсор = (минута_эпохи × perTick) % len. Пропуск тика сдвигает
+// окно, но не ломает покрытие. KV-вариант съедал ~2880 put/get в сутки
+// (free tier KV — 1000 put/сутки).
+export function pickNiches(all: Niche[], perTick: number): Niche[] {
   if (all.length === 0 || perTick >= all.length) return all;
 
-  const raw = await env.ORDERS_KV.get(ROTATION_KEY);
-  let cursor = 0;
-  if (raw !== null) {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed)) cursor = ((parsed % all.length) + all.length) % all.length;
-  }
+  const minute = Math.floor(Date.now() / 60000);
+  const cursor = (minute * perTick) % all.length;
 
   const picked: Niche[] = [];
   for (let i = 0; i < perTick; i += 1) {
     picked.push(all[(cursor + i) % all.length]);
   }
-
-  const next = (cursor + perTick) % all.length;
-  await env.ORDERS_KV.put(ROTATION_KEY, String(next), { expirationTtl: SEEN_TTL });
   return picked;
-}
-
-export async function markStatus(
-  env: Env,
-  id: number,
-  status: string,
-  reason?: string
-): Promise<void> {
-  const key = seenKey(id);
-  const existing = await env.ORDERS_KV.get(key);
-  const record: SeenRecord = { status, ts: Date.now() };
-  if (reason !== undefined) {
-    record.reason = reason;
-  } else if (existing !== null) {
-    try {
-      const prev = JSON.parse(existing) as SeenRecord;
-      if (prev.reason !== undefined) record.reason = prev.reason;
-    } catch {
-      // ignore malformed record
-    }
-  }
-  await env.ORDERS_KV.put(key, JSON.stringify(record), { expirationTtl: SEEN_TTL });
 }

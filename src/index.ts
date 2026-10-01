@@ -2,8 +2,8 @@ import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
 import { NICHES } from "./niches";
 import { fetchAllNiches } from "./parser";
-import { processOrders, pickNiches, markStatus } from "./service";
-import { log, logImportant, logError, heartbeat, readRing } from "./logger";
+import { processOrders, pickNiches } from "./service";
+import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
   scoreOrder,
   buildBidMessages,
@@ -57,13 +57,23 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     errors: [],
   };
 
+  // Пинг неподтверждённых BID — раз в 15 минут: list-операции в KV
+  // лимитированы (free tier — 1000/сутки), а чаще проверять не нужно
+  // (порог пинга — 25 минут). Не пингуем сразу после старта тика?
+  // Порядок не важен: пинг отдельный от обработки заказов.
   try {
-    await pingUnappliedBids(env);
+    const PING_INTERVAL_MS = 15 * 60 * 1000;
+    const raw = await env.ORDERS_KV.get("ping:last");
+    const last = raw === null ? 0 : Number(raw);
+    if (!Number.isFinite(last) || Date.now() - last >= PING_INTERVAL_MS) {
+      await env.ORDERS_KV.put("ping:last", String(Date.now()), { expirationTtl: 86400 });
+      await pingUnappliedBids(env);
+    }
   } catch (e) {
     console.error("pingUnappliedBids failed:", e);
   }
 
-  const niches = await pickNiches(env, NICHES, cfg.nichesPerTick);
+  const niches = pickNiches(NICHES, cfg.nichesPerTick);
   stats.niches = niches.length;
   log("niches.picked", { ids: niches.map((n) => n.id) });
 
@@ -101,7 +111,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     if (llmBroken) {
       const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
       await sendTelegram(env, card);
-      await markStatus(env, order.id, "error", "kimi-429");
       continue;
     }
 
@@ -111,7 +120,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       if (score === null) {
         const card = formatRawCard(order, "скоринг не распарсился — сырая карточка");
         await sendTelegram(env, card);
-        await markStatus(env, order.id, "error", "scoring-parse-failed");
         continue;
       }
 
@@ -126,7 +134,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       });
 
       if (score.verdict === "PASS") {
-        await markStatus(env, order.id, "llm-pass", score.reason);
         stats.llmPass += 1;
         // ВРЕМЕННО (debug): присылаем PASS-карточки для ручной проверки решений LLM.
         // Удалить после отладки — вместе с этим блоком и пометкой в AGENT.md.
@@ -164,7 +171,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       if (score.verdict === "BID") {
         await saveBidCard(env, order);
       }
-      await markStatus(env, order.id, "notified");
       stats.notified += 1;
       await logImportant(env, "order.notified", {
         id: order.id,
@@ -179,7 +185,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         await logError(env, "order.error", { id: order.id, err: "kimi-429" });
         const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
         await sendTelegram(env, card);
-        await markStatus(env, order.id, "error", "kimi-429");
         continue;
       }
       console.error(`order ${order.id} processing failed:`, e);
@@ -190,11 +195,11 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       } catch (sendErr) {
         console.error("raw card send failed:", sendErr);
       }
-      await markStatus(env, order.id, "error", String(e));
     }
   }
 
   await finishTick(env, stats, startedAt);
+  await flushLogBuffer(env);
   return stats;
 }
 
