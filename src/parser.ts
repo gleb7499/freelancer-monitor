@@ -28,6 +28,9 @@ interface FreelancerProject {
     maximum?: number;
     currency?: { code?: string; sign?: string; exchange_rate?: number };
   };
+  // В compact-ответах валюта с exchange_rate лежит в корне проекта,
+  // а budget.currency отсутствует.
+  currency?: { code?: string; sign?: string; exchange_rate?: number };
   bid_stats?: { bid_count?: number; bid_avg?: number };
   upgrades?: Record<string, unknown>;
   active_prepaid_milestone?: unknown;
@@ -59,7 +62,7 @@ function originalAmount(value: number | undefined): number {
 }
 
 function normalizeProject(project: FreelancerProject, nicheId: string): Order {
-  const currency = project.budget?.currency;
+  const currency = project.budget?.currency ?? project.currency;
   const exchangeRate =
     currency && currency.code !== "USD" && typeof currency.exchange_rate === "number"
       ? currency.exchange_rate
