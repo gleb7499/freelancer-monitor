@@ -1,6 +1,6 @@
 # Freelancer.com Order Monitor
 
-Cloudflare Worker (TypeScript) that scans new Freelancer.com projects every minute across 12 niches, filters duplicates and junk, scores promising orders with an LLM (Kimi), and sends Telegram cards with a ready-made bid draft. A human reviews each card and submits the bid manually — **the bot never bids on its own**.
+Cloudflare Worker (TypeScript) that scans new Freelancer.com projects every minute across 12 niches, filters duplicates and junk, scores promising orders with an LLM (Kimi), and sends Telegram cards with a ready-made bid draft. A human reviews each card and submits the bid manually — **the bot never bids on its own**. This module is for Freelancer; the architecture is designed to admit other platforms (Upwork etc.) later — platform-specific parsing/selection stays isolated from the shared pipeline.
 
 ## How it works
 
@@ -9,8 +9,9 @@ Minute-cron pipeline, 4 layers:
 ```
 [1] Parser          fetchAllNiches → fresh orders from the Freelancer API
       ↓
-[2] Dedup/filters   KV seen:* + static rules (bids count, budget, language,
-                    fulltime-only, deadline)
+[2] Dedup/filters   KV seen:* + static rules (bids count, language,
+                    fulltime-only, deadline) — no budget/rate thresholds,
+                    price fitness is decided by the LLM only
       ↓
 [3] LLM scoring     scoreOrder → verdict BID / PASS (Kimi, JSON-schema,
                     retries, validation)
@@ -39,7 +40,7 @@ rules/         — original selection rules and response skill (source for LLM p
 
 ## Configuration
 
-Non-secret tunables live in `wrangler.toml` `[vars]` (model name, API bases, budget thresholds, card rate limits). Secrets are set only via `wrangler secret` / dashboard and never appear in the repo:
+Non-secret tunables live in `wrangler.toml` `[vars]` (model name, API bases, weekly limit, card rate limits). Secrets are set only via `wrangler secret` / dashboard and never appear in the repo:
 
 ```
 KIMI_API_KEY

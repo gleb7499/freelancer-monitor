@@ -219,12 +219,7 @@ async function chatWithRetries(
   }
 }
 
-export async function scoreOrder(
-  env: Env,
-  order: Order,
-  extraRetryMessage?: string,
-  postCheck?: (score: ScoreResult) => string | null,
-): Promise<ScoreResult | null> {
+export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | null> {
   const cfg = getConfig(env);
   const messages = [
     { role: "system", content: buildScoringSystemPrompt(cfg) },
@@ -250,27 +245,16 @@ export async function scoreOrder(
     parsed = undefined;
   }
   let errors = parsed === undefined ? ["response is not valid JSON"] : validateScore(parsed, order);
-  let postError: string | null = null;
   if (errors.length === 0) {
-    postError = postCheck ? postCheck(normalizeScore(parsed, order)) : null;
-    if (postError === null) {
-      return normalizeScore(parsed, order);
-    }
+    return normalizeScore(parsed, order);
   }
 
-  const retryReason =
-    errors.length > 0
-      ? `Validation failed: ${errors.join("; ")}.`
-      : `${postError}.`;
   const retryMessages = [
     ...messages,
     { role: "assistant", content: raw },
     {
       role: "user" as const,
-      content:
-        retryReason +
-        (extraRetryMessage ? ` ${extraRetryMessage}` : "") +
-        " Return corrected JSON only.",
+      content: `Validation failed: ${errors.join("; ")}. Return corrected JSON only.`,
     },
   ];
   try {
@@ -290,7 +274,6 @@ export async function scoreOrder(
   }
   errors = validateScore(parsed, order);
   if (errors.length > 0) return null;
-  if (postCheck && postCheck(normalizeScore(parsed, order)) !== null) return null;
   return normalizeScore(parsed, order);
 }
 

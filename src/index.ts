@@ -36,66 +36,6 @@ interface TickStats {
   errors: string[];
 }
 
-// Детерминированный пол бюджета: LLM может пропустить дешёвый hourly,
-// правило ниже переопределяет его вердикт после скоринга, до отправки карточки.
-function applyHourlyBudgetFloor(
-  env: Env,
-  order: Order,
-  score: ScoreResult,
-  cfg: Config,
-): void {
-  if (score.verdict !== "BID") return;
-  if (order.type !== "hourly") return;
-  if (order.budget_max >= cfg.minHourlyUsd) return;
-  score.verdict = "PASS";
-  score.reason = `бюджет ниже пола: $${Math.round(order.budget_max)}/ч < $${cfg.minHourlyUsd}/ч`;
-  logImportant(env, "llm.verdict-floor-override", {
-    id: order.id,
-    budget_max_usd: order.budget_max,
-    min_hourly_usd: cfg.minHourlyUsd,
-  });
-}
-
-// Пол ставки: ставка ниже конфиг-порога своего типа — один retry скоринга,
-// затем принудительный PASS.
-async function enforceBidFloor(
-  env: Env,
-  order: Order,
-  score: ScoreResult,
-  cfg: Config,
-): Promise<ScoreResult> {
-  if (score.verdict !== "BID") return score;
-  const threshold = order.type === "hourly" ? cfg.minHourlyUsd : cfg.minFixedUsd;
-  if (score.bid_amount >= threshold) return score;
-
-  const postCheck = (s: ScoreResult): string | null =>
-    s.verdict === "BID" && s.bid_amount < threshold
-      ? `bid_amount $${s.bid_amount} is below the floor $${threshold} for ${order.type}`
-      : null;
-  const extraRetryMessage = `Your bid_amount must be at least $${threshold} for ${order.type} projects — raise the bid (or return verdict PASS if the order is not worth bidding at that price).`;
-  let rescored: ScoreResult | null = null;
-  let retried = false;
-  try {
-    rescored = await scoreOrder(env, order, extraRetryMessage, postCheck);
-    retried = true;
-  } catch (e) {
-    console.error("enforceBidFloor retry failed:", e);
-  }
-  const finalScore = rescored ?? score;
-  if (finalScore.verdict === "BID" && finalScore.bid_amount < threshold) {
-    finalScore.verdict = "PASS";
-    finalScore.reason = `ставка ниже пола: $${finalScore.bid_amount} < $${threshold} (${order.type})`;
-    logImportant(env, "llm.bid-floor-override", {
-      id: order.id,
-      bid_amount: finalScore.bid_amount,
-      threshold,
-      type: order.type,
-      retried,
-    });
-  }
-  return finalScore;
-}
-
 // Потолок weekly limit для hourly: LLM может только снизить лимит.
 function clampWeeklyLimit(score: ScoreResult, cfg: Config): void {
   if (score.weekly_limit_hours === null) return;
@@ -182,8 +122,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         continue;
       }
 
-      applyHourlyBudgetFloor(env, order, score, cfg);
-      score = await enforceBidFloor(env, order, score, cfg);
       clampWeeklyLimit(score, cfg);
 
       await logImportant(env, "llm.verdict", {
@@ -329,10 +267,7 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
     if (score === null) {
       return jsonResponse({ order, score: null, reason: "scoring parse failed" });
     }
-    const testCfg = getConfig(env);
-    applyHourlyBudgetFloor(env, order, score, testCfg);
-    score = await enforceBidFloor(env, order, score, testCfg);
-    clampWeeklyLimit(score, testCfg);
+    clampWeeklyLimit(score, getConfig(env));
     let removedUpgrades: UpgradeId[] = [];
     if (score.verdict === "BID") {
       const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);

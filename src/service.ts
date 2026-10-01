@@ -1,5 +1,4 @@
 import type { Env, Order, Niche } from "./types";
-import { getConfig } from "./config";
 
 const SEEN_TTL = 2592000;
 const ROTATION_KEY = "rot:cursor";
@@ -31,14 +30,8 @@ export function classifyCompetition(bids: number): "normal" | "high" | "extreme"
   return "extreme";
 }
 
-export function staticReject(order: Order, cfg: ReturnType<typeof getConfig>): string | null {
+export function staticReject(order: Order): string | null {
   if (order.bids > 100) return `rej:bids>100`;
-  if (order.type === "fixed" && order.budget_min < cfg.minBudgetUsd) {
-    return `rej:budget=${order.budget_min}`;
-  }
-  if (order.type === "hourly" && order.budget_max < cfg.minHourlyUsd) {
-    return `rej:hourly=${order.budget_max}`;
-  }
   if (order.upgrades.fulltime) return "rej:fulltime";
   if (order.language !== "en") return `rej:lang=${order.language}`;
   if (order.deadline_hint !== null && order.submit_ts > 0) {
@@ -61,7 +54,6 @@ export async function processOrders(
   seenCount: number;
   byReason: Record<string, number>;
 }> {
-  const cfg = getConfig(env);
   const fresh = await filterNew(env, orders);
   const seenCount = orders.length - fresh.length;
 
@@ -82,7 +74,7 @@ export async function processOrders(
         return;
       }
       order.competition = tier;
-      const reason = staticReject(order, cfg);
+      const reason = staticReject(order);
       const record: SeenRecord = reason
         ? { status: "rejected", reason, ts: Date.now() }
         : { status: "passed", ts: Date.now() };

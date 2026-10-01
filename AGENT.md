@@ -29,7 +29,7 @@ Pipeline per cron tick (4 layers), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*`
 - `parser.ts` — Freelancer API → `Order[]` (`fetchAllNiches`); бюджеты пересчитываются в USD через `currency.exchange_rate`, оригинальные суммы и код валюты сохраняются для карточки
-- `service.ts` — KV dedup (`seen:*`), static filters (bids, budget, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min)
+- `service.ts` — KV dedup (`seen:*`), static filters (bids, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min). Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM
 - `kimi.ts` — LLM scoring, JSON-schema output, retries, validation
 - `prompts.ts` — scoring prompts; operator-facing fields (`reason`, `red_flags`, `check_manually`, `deadline_caveat`, `summary_ru`) are written in Russian by design
 - `telegram.ts` — cards, 5 cards/hour limit, overflow digest, alerts throttled to 1/hour
@@ -43,10 +43,11 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 
 ## Post-scoring rules (deterministic, LLM does not decide these)
 
-- **Hourly budget floor:** after scoring, before the card — if `type === "hourly"` and `budget_max < MIN_HOURLY_USD`, the verdict is forced to `PASS` with reason «бюджет ниже пола» (`applyHourlyBudgetFloor` in `index.ts`).
-- **Bid floor:** if `bid_amount < MIN_HOURLY_USD` (hourly) or `< MIN_FIXED_USD` (fixed) — one re-scoring retry with a message about the floor (`enforceBidFloor`); still below after retry → forced `PASS`. Floor values are injected into the scoring system prompt as text, so changing the env vars (`MIN_HOURLY_USD`, `MIN_FIXED_USD`) changes both prompt and validation — no code edits needed.
 - **Weekly limit (hourly):** final `weekly_limit_hours = min(LLM value or DEFAULT_WEEKLY_LIMIT, DEFAULT_WEEKLY_LIMIT, 40)` (`clampWeeklyLimit`). LLM may lower it for a tight deadline, never raise it.
 - **Fee/net:** fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
+- **No budget floors.** Budget/rate thresholds were deliberately removed: static filters and post-scoring validation never reject by price (no `MIN_BUDGET_USD`/`MIN_FIXED_USD`/`MIN_HOURLY_USD`). Cheap orders (incl. low INR budgets) reach the LLM, which decides price fitness in the verdict.
+
+Note: platform-specific selection rules live in `rules/freelancer-*.md`. More platforms (Upwork etc.) are planned — each platform will have slightly different selection rules, so keep platform-specific logic separated from the common pipeline (parser per platform, shared dedup/scoring/card layers).
 
 ## Response tracking (Telegram inline button)
 

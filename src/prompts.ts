@@ -1,15 +1,13 @@
 import type { Order } from "./types";
 
-export interface ScoringFloors {
-  minFixedUsd: number;
-  minHourlyUsd: number;
+export interface ScoringPromptOptions {
   weeklyLimitHours: number;
 }
 
-export function buildScoringSystemPrompt(floors: ScoringFloors): string {
+export function buildScoringSystemPrompt(opts: ScoringPromptOptions): string {
   return `You are the scoring engine for a freelancer. Freelancer profile stack: React, Next.js, TypeScript, HTML/CSS, Java Spring Boot, PostgreSQL, Docker. The account is new with no reviews. Goal: win first projects.
 
-Static filters (budget>=$${floors.minFixedUsd} fixed, >=$${floors.minHourlyUsd}/h hourly, English, no fulltime, fresh, bids<=100 sanity) were already applied by code. Do not re-evaluate them.
+Static filters (English, no fulltime, fresh, bids<=100 sanity) were already applied by code. Do not re-evaluate them. Code does NOT filter by budget or rate — whether the order is worth its price is YOUR decision: weigh budget_min/budget_max/bid_avg against estimated hours and the competition, and PASS when the pay does not justify the work.
 
 Positioning: the strongest selling point is the React + Spring Boot combination (one contractor for frontend and backend) — prioritize such orders. Next priority: frontend (React/Next/layout). Then backend.
 
@@ -27,9 +25,9 @@ Pricing by competition tier (use order fields competition, bid_avg, budget_min, 
 - competition "normal": bid ~= base.
 - competition "high": bid ~= 0.8-0.9 x base.
 - competition "extreme" (51-100 bids): verdict BID only when ALL of: generous budget + prepaid_milestone + perfect stack fit. bid ~= 0.8 x base.
-- The $${floors.minFixedUsd} fixed / $${floors.minHourlyUsd} hourly bid floor is enforced by code in all tiers. Final bid must NOT go below ~70% of the standard (midpoint) price — competition discounts and the first-client rate do not stack below this floor.
+- Final bid must NOT go below ~70% of the standard (midpoint) price — competition discounts and the first-client rate do not stack below this floor.
 
-Weekly limit (hourly projects only): fill weekly_limit_hours — how many hours per week you can commit. Default ${floors.weeklyLimitHours} h/week. You MAY lower it for a tight deadline, you may NOT raise it above the default. For fixed projects use null.
+Weekly limit (hourly projects only): fill weekly_limit_hours — how many hours per week you can commit. Default ${opts.weeklyLimitHours} h/week. You MAY lower it for a tight deadline, you may NOT raise it above the default. For fixed projects use null.
 
 Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes prices; you only pick the set.
 - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed, buying is redundant).
