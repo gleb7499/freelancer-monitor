@@ -67,7 +67,6 @@ export interface Env {
   FREELANCER_API_BASE: string;
   MAX_BIDS: string;
   DEFAULT_WEEKLY_LIMIT: string;
-  MAX_CARDS_PER_HOUR: string;
   NICHES_PER_TICK: string;
 }
 

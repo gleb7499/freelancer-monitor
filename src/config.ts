@@ -15,7 +15,6 @@ export function getConfig(env: Env) {
   return {
     maxBids: num(env, "MAX_BIDS", 15),
     weeklyLimitHours: num(env, "DEFAULT_WEEKLY_LIMIT", 40),
-    maxCardsPerHour: num(env, "MAX_CARDS_PER_HOUR", 5),
     nichesPerTick: num(env, "NICHES_PER_TICK", 4),
     kimiBase: stripTrailingSlash(env.KIMI_API_BASE ?? ""),
     kimiModel: env.KIMI_MODEL ?? "",

@@ -16,8 +16,8 @@ Minute-cron pipeline, 4 layers:
 [3] LLM scoring     scoreOrder → verdict BID / PASS (Kimi, JSON-schema,
                     retries, validation)
       ↓
-[4] Telegram        order card + bid draft (limit: 5 cards/hour, overflow
-                    goes to a digest; error alerts throttled to 1/hour)
+[4] Telegram        order card + bid draft (no rate limit; error alerts
+                    throttled to 1/hour)
 ```
 
 Niches rotate: `pickNiches` takes 4 niches per tick, a full pass takes 3 minutes.
@@ -34,7 +34,7 @@ src/
   service.ts   — KV dedup, static filters, niche rotation
   kimi.ts      — scoring via Kimi API (JSON-schema, retries, validation)
   prompts.ts   — scoring prompts and bid text templates
-  telegram.ts  — cards, per-hour card limit, digest, alerts
+  telegram.ts  — cards, alerts
 rules/         — selection rules and response skill; their file content is injected into the LLM prompts at build time (scripts/gen-rules.mjs)
 ```
 

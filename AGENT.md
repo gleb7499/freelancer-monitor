@@ -32,7 +32,7 @@ Pipeline per cron tick (4 layers), all in `src/`:
 - `service.ts` — KV dedup (`seen:*`), static filters (bids, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min). Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM
 - `kimi.ts` — LLM scoring, JSON-schema output, retries, validation
 - `prompts.ts` — scoring prompts; operator-facing fields (`reason`, `red_flags`, `check_manually`, `deadline_caveat`, `summary_ru`) are written in Russian by design
-- `telegram.ts` — cards, 5 cards/hour limit, overflow digest, alerts throttled to 1/hour
+- `telegram.ts` — cards sent as they come (no rate limit), alerts throttled to 1/hour
 - `config.ts` / `types.ts` / `niches.ts` — typed env config, shared types, 12 niche definitions
 
 Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, thresholds, limits). Change them there, not in code.
@@ -46,7 +46,7 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 - **Weekly limit (hourly):** final `weekly_limit_hours = min(LLM value or DEFAULT_WEEKLY_LIMIT, DEFAULT_WEEKLY_LIMIT, 40)` (`clampWeeklyLimit`). LLM may lower it for a tight deadline, never raise it.
 - **Fee/net:** fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
 - **No budget floors.** Budget/rate thresholds were deliberately removed: static filters and post-scoring validation never reject by price (no `MIN_BUDGET_USD`/`MIN_FIXED_USD`/`MIN_HOURLY_USD`). Cheap orders (incl. low INR budgets) reach the LLM, which decides price fitness in the verdict.
-- **TEMPORARY (debug, remove after LLM tuning):** PASS verdicts also get a Telegram card (`🔍 DEBUG PASS` prefix, sent outside the 5-cards/hour limit) so the operator can audit LLM rejections in person.
+- **TEMPORARY (debug, remove after LLM tuning):** PASS verdicts also get a Telegram card (`🔍 DEBUG PASS` prefix) so the operator can audit LLM rejections in person.
 
 Note: platform-specific selection rules live in `rules/freelancer-*.md`. More platforms (Upwork etc.) are planned — each platform will have slightly different selection rules, so keep platform-specific logic separated from the common pipeline (parser per platform, shared dedup/scoring/card layers).
 
@@ -81,4 +81,4 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 
 - First deploy of a fresh clone: create KV namespace, set the 4 secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.
-- Alerts and digests are rate-limited on purpose — don't bypass the limits when changing `telegram.ts`.
+- Alerts are rate-limited on purpose (1/hour) — don't bypass the limit when changing `telegram.ts`. Card sending is intentionally unlimited.

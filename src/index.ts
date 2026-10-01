@@ -14,8 +14,6 @@ import {
   formatOrderCard,
   formatRawCard,
   sendTelegram,
-  sendCardWithLimit,
-  flushDigest,
   alert,
   pingUnappliedBids,
   saveBidCard,
@@ -60,12 +58,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   };
 
   try {
-    await flushDigest(env);
-  } catch (e) {
-    console.error("flushDigest failed:", e);
-  }
-
-  try {
     await pingUnappliedBids(env);
   } catch (e) {
     console.error("pingUnappliedBids failed:", e);
@@ -108,7 +100,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   for (const order of fresh) {
     if (llmBroken) {
       const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
-      await sendCardWithLimit(env, card, { title: order.title });
+      await sendTelegram(env, card);
       await markStatus(env, order.id, "error", "kimi-429");
       continue;
     }
@@ -118,7 +110,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
 
       if (score === null) {
         const card = formatRawCard(order, "скоринг не распарсился — сырая карточка");
-        await sendCardWithLimit(env, card, { title: order.title });
+        await sendTelegram(env, card);
         await markStatus(env, order.id, "error", "scoring-parse-failed");
         continue;
       }
@@ -168,7 +160,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         score.verdict === "BID"
           ? { inline_keyboard: [[{ text: "Откликнулся ✅", callback_data: `applied:${order.id}` }]] }
           : undefined;
-      await sendCardWithLimit(env, card, { title: order.title }, keyboard);
+      await sendTelegram(env, card, keyboard);
       if (score.verdict === "BID") {
         await saveBidCard(env, order);
       }
@@ -186,7 +178,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         llmBroken = true;
         await logError(env, "order.error", { id: order.id, err: "kimi-429" });
         const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
-        await sendCardWithLimit(env, card, { title: order.title });
+        await sendTelegram(env, card);
         await markStatus(env, order.id, "error", "kimi-429");
         continue;
       }
@@ -194,7 +186,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       await logError(env, "order.error", { id: order.id, err: String(e).slice(0, 200) });
       try {
         const card = formatRawCard(order, `ошибка обработки: ${String(e)}`);
-        await sendCardWithLimit(env, card, { title: order.title });
+        await sendTelegram(env, card);
       } catch (sendErr) {
         console.error("raw card send failed:", sendErr);
       }

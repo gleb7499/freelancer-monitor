@@ -1,5 +1,4 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
-import { getConfig } from "./config";
 import { priceUpgrades, totalPrice } from "./upgrades";
 
 export class TelegramError extends Error {
@@ -198,14 +197,6 @@ export function formatRawCard(order: Order, note: string): string {
   return text;
 }
 
-export function formatDigest(count: number, titles: string[]): string {
-  const shown = titles
-    .slice(0, 5)
-    .map((t) => `· ${escHtml(t)}`)
-    .join("\n");
-  return `Ещё ${count} заказов за час:\n${shown}`;
-}
-
 export async function sendTelegram(
   env: Env,
   text: string,
@@ -240,48 +231,6 @@ export async function sendTelegram(
       throw new TelegramError(res.status, snippet);
     }
   }
-}
-
-function hourKey(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `tg:count:${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}-${pad(d.getUTCHours())}`;
-}
-
-interface CountState {
-  n: number;
-  q: string[];
-}
-
-async function readState(env: Env, key: string): Promise<CountState> {
-  const raw = await env.ORDERS_KV.get(key);
-  if (!raw) return { n: 0, q: [] };
-  try {
-    const parsed = JSON.parse(raw) as CountState;
-    return { n: parsed.n ?? 0, q: parsed.q ?? [] };
-  } catch {
-    return { n: 0, q: [] };
-  }
-}
-
-export async function sendCardWithLimit(
-  env: Env,
-  card: string,
-  meta: { title: string },
-  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
-): Promise<"sent" | "queued"> {
-  const cfg = getConfig(env);
-  const key = hourKey();
-  const state = await readState(env, key);
-  if (state.n < cfg.maxCardsPerHour) {
-    await sendTelegram(env, card, replyMarkup);
-    state.n += 1;
-    await env.ORDERS_KV.put(key, JSON.stringify(state), { expirationTtl: 7200 });
-    return "sent";
-  }
-  state.q.push(meta.title);
-  await env.ORDERS_KV.put(key, JSON.stringify(state), { expirationTtl: 7200 });
-  return "queued";
 }
 
 const BIDCARD_TTL = 86400;
@@ -363,22 +312,6 @@ export async function setWebhook(env: Env, webhookUrl: string): Promise<unknown>
   });
   const text = await res.text();
   return { status: res.status, body: text };
-}
-
-export async function flushDigest(env: Env): Promise<void> {
-  const d = new Date(Date.now() - 3600_000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const prevKey = `tg:count:${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}-${pad(d.getUTCHours())}`;
-  const state = await readState(env, prevKey);
-  if (state.q.length === 0) return;
-  const digest = formatDigest(state.q.length, state.q);
-  try {
-    await sendTelegram(env, digest);
-    state.q = [];
-    await env.ORDERS_KV.put(prevKey, JSON.stringify(state), { expirationTtl: 7200 });
-  } catch (err) {
-    console.warn("flushDigest failed:", err);
-  }
 }
 
 export async function alert(env: Env, text: string): Promise<void> {
