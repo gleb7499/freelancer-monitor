@@ -115,16 +115,23 @@ export function validateScore(s: any, order: Order): string[] {
       errors.push(`${k} must be an array of strings`);
     }
   }
+  // Для PASS модель ставит нули (bid_amount/delivery_days не имеют смысла) —
+  // принимаем >= 0. Для BID — строго > 0 и sanity-диапазон по бюджету.
   if (
     typeof s.bid_amount !== "number" ||
     !Number.isFinite(s.bid_amount) ||
-    s.bid_amount <= 0
+    s.bid_amount < 0 ||
+    (s.verdict === "BID" && s.bid_amount <= 0)
   ) {
-    errors.push("bid_amount must be a positive number");
+    errors.push("bid_amount must be a non-negative number (positive for BID)");
   } else if (
+    s.verdict === "BID" &&
     typeof order.budget_min === "number" &&
-    typeof order.budget_max === "number"
+    typeof order.budget_max === "number" &&
+    order.budget_max > 0
   ) {
+    // Sanity-диапазон только для BID: для PASS модель ставит фиктивный bid.
+    // budget_max = 0 встречается в API (часть hourly) — тогда диапазон не проверяем.
     const lo = order.budget_min * 0.5;
     const hi = Math.min(order.budget_max * 1.5, 50000);
     if (s.bid_amount < lo || s.bid_amount > hi) {
@@ -136,9 +143,10 @@ export function validateScore(s: any, order: Order): string[] {
   if (
     typeof s.delivery_days !== "number" ||
     !Number.isFinite(s.delivery_days) ||
-    s.delivery_days <= 0
+    s.delivery_days < 0 ||
+    (s.verdict === "BID" && s.delivery_days <= 0)
   ) {
-    errors.push("delivery_days must be a positive number");
+    errors.push("delivery_days must be a non-negative number (positive for BID)");
   }
   if (!(typeof s.deadline_caveat === "string" || s.deadline_caveat === null)) {
     errors.push("deadline_caveat must be a string or null");
@@ -172,7 +180,8 @@ export function validateScore(s: any, order: Order): string[] {
 function normalizeScore(s: any, order: Order): ScoreResult {
   const bid = s.bid_amount as number;
   // Freelancer fee: fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
-  const fee = order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5);
+  // bid = 0 (PASS-заглушка) → fee/net = 0, без отрицательного net.
+  const fee = bid <= 0 ? 0 : order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5);
   const net = Math.round((bid - fee) * 100) / 100;
   let weeklyLimit: number | null = null;
   if (order.type === "hourly") {
@@ -248,13 +257,22 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
   if (errors.length === 0) {
     return normalizeScore(parsed, order);
   }
+  console.error("scoreOrder first-pass validation failed", {
+    id: order.id,
+    errors,
+    raw: raw.slice(0, 500),
+  });
 
+  const bidHint =
+    typeof order.budget_max === "number" && order.budget_max > 0
+      ? `If verdict is BID, bid_amount must be within [${order.budget_min * 0.5}, ${Math.min(order.budget_max * 1.5, 50000)}]; for PASS use 0 for bid_amount and delivery_days.`
+      : "For PASS use 0 for bid_amount and delivery_days.";
   const retryMessages = [
     ...messages,
     { role: "assistant", content: raw },
     {
       role: "user" as const,
-      content: `Validation failed: ${errors.join("; ")}. Return corrected JSON only.`,
+      content: `Validation failed: ${errors.join("; ")}. ${bidHint} Return corrected JSON only.`,
     },
   ];
   try {
@@ -273,7 +291,14 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     return null;
   }
   errors = validateScore(parsed, order);
-  if (errors.length > 0) return null;
+  if (errors.length > 0) {
+    console.error("scoreOrder retry validation failed", {
+      id: order.id,
+      errors,
+      raw: raw.slice(0, 500),
+    });
+    return null;
+  }
   return normalizeScore(parsed, order);
 }
 

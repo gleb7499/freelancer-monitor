@@ -74,6 +74,11 @@ function normalizeProject(project: FreelancerProject, nicheId: string): Order {
   const description =
     (project.description ?? project.preview_description ?? "").slice(0, MAX_DESCRIPTION_LENGTH);
 
+  const budgetMin = originalAmount(project.budget?.minimum);
+  // У части заказов (чаще hourly) API отдаёт budget.maximum = 0 — считаем max = min.
+  const budgetMaxRaw = originalAmount(project.budget?.maximum);
+  const budgetMax = budgetMaxRaw > 0 ? budgetMaxRaw : budgetMin;
+
   return {
     platform: "freelancer",
     niche_id: nicheId,
@@ -82,9 +87,9 @@ function normalizeProject(project: FreelancerProject, nicheId: string): Order {
     url: `https://www.freelancer.com/projects/${project.seo_url ?? ""}`,
     type: project.type === "hourly" ? "hourly" : "fixed",
     budget_min: usdAmount(project.budget?.minimum, exchangeRate),
-    budget_max: usdAmount(project.budget?.maximum, exchangeRate),
-    budget_min_original: originalAmount(project.budget?.minimum),
-    budget_max_original: originalAmount(project.budget?.maximum),
+    budget_max: usdAmount(budgetMax, exchangeRate),
+    budget_min_original: budgetMin,
+    budget_max_original: budgetMax,
     currency_code: currency?.code ?? "USD",
     currency_sign: currency?.sign ?? "$",
     bids: project.bid_stats?.bid_count ?? 0,
