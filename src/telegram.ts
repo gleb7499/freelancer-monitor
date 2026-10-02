@@ -85,7 +85,9 @@ export function formatOrderCard(
 
   if (score) {
     parts.push(`✅ Вердикт: ${score.verdict} — ${values.REASON}`);
-    parts.push(`💵 Ставка: $${score.bid_amount} → на руки $${score.net_amount}`);
+    if (score.verdict === "BID") {
+      parts.push(`💵 Ставка: $${score.bid_amount} → на руки $${score.net_amount}`);
+    }
     if (order.type === "hourly" && score.weekly_limit_hours !== null) {
       parts.push(`⏱ Weekly limit: ${score.weekly_limit_hours} ч/нед`);
     }

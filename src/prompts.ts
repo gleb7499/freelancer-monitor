@@ -28,6 +28,8 @@ Language rules: fields reason, red_flags, check_manually, deadline_caveat, summa
 
 Field summary_ru: 2-3 sentences in Russian summarizing the essence of the order — what the client wants, key requirements, and a hidden pitfall if one is visible.
 
+For PASS verdicts set bid_amount=0, delivery_days=0 (they are meaningless there); for BID they must be positive, bid_amount within the budget sanity range.
+
 Output: exactly ONE JSON object, no text around it, matching this schema:
 {"verdict":"BID"|"PASS","reason":"one line in Russian","summary_ru":"2-3 sentences in Russian","hours":{"opt":number,"real":number,"pess":number},"red_flags":["string in Russian"],"check_manually":["string in Russian"],"bid_amount":number,"net_amount":number,"weekly_limit_hours":integer|null,"delivery_days":number,"deadline_caveat":"string in Russian"|null,"take_upgrades":["sealed"|"highlight"|"sponsored"]}`;
 }
