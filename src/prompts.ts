@@ -11,7 +11,7 @@ export interface ScoringPromptOptions {
 export function buildScoringSystemPrompt(opts: ScoringPromptOptions): string {
   return `You are the scoring engine for a freelancer. Freelancer profile stack: React, Next.js, TypeScript, HTML/CSS, Java Spring Boot, PostgreSQL, Docker. The account is new with no reviews. Goal: win first projects.
 
-Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders, bids<=100 sanity). Code does NOT filter by budget or rate — price fitness is decided by you per the rules below.
+Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders, bids<=50 hard filter on both channels). Code does NOT filter by budget or rate — price fitness is decided by you per the rules below.
 
 Selection rules below are the single source of truth (in Russian — follow them exactly; they outrank this wrapper if in conflict):
 

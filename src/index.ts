@@ -1,8 +1,9 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
 import { NICHES } from "./niches";
-import { fetchAllNiches } from "./parser";
-import { processOrders, pickNiches } from "./service";
+import { fetchAllNiches, fetchProjectsByIds } from "./parser";
+import { processOrders, pickNiches, filterNew, classifyCompetition, markAlertSeen } from "./service";
+import { fetchAlertLeads } from "./sources/freelancer-alerts";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
   scoreOrder,
@@ -23,6 +24,7 @@ import {
   bidCardKey,
 } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
+import { placeBid } from "./bidder";
 
 interface TickStats {
   niches: number;
@@ -32,7 +34,21 @@ interface TickStats {
   fresh: number;
   notified: number;
   llmPass: number;
+  alertsFetched: number;
+  alertsFresh: number;
   errors: string[];
+}
+
+const AUTH_ALERT_KEY = "alerts:auth_alerted";
+const AUTH_ALERT_TTL_SEC = 3600;
+
+async function sendAuthAlertOnce(env: Env, message: string): Promise<void> {
+  const already = await env.ORDERS_KV.get(AUTH_ALERT_KEY);
+  if (already !== null) return;
+  await env.ORDERS_KV.put(AUTH_ALERT_KEY, String(Date.now()), {
+    expirationTtl: AUTH_ALERT_TTL_SEC,
+  });
+  await alert(env, message);
 }
 
 // Потолок weekly limit для hourly: LLM может только снизить лимит.
@@ -54,6 +70,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     fresh: 0,
     notified: 0,
     llmPass: 0,
+    alertsFetched: 0,
+    alertsFresh: 0,
     errors: [],
   };
 
@@ -73,6 +91,50 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     console.error("pingUnappliedBids failed:", e);
   }
 
+  const ordersToScore: Order[] = [];
+
+  // --- Alert-канал (saved search alerts) — независим от search, ошибки не роняют тик ---
+  try {
+    const alerts = await fetchAlertLeads(env);
+    if (alerts.authFailed) {
+      log("alerts.authFailed", {});
+      await sendAuthAlertOnce(
+        env,
+        "Протухла сессия Freelancer (alerts), обнови куки через /admin/fl-auth",
+      );
+    } else if (alerts.error !== null) {
+      stats.errors.push(alerts.error);
+      await logError(env, "alerts.error", { message: alerts.error });
+    } else if (alerts.leads.length > 0) {
+      stats.alertsFetched = alerts.leads.length;
+      log("alerts.fetched", { count: alerts.leads.length });
+      try {
+        const alertOrders = await fetchProjectsByIds(
+          env,
+          alerts.leads.map((l) => l.projectId),
+        );
+        const alertSeen = await filterNew(env, alertOrders);
+        // Freelancer уже отфильтровал по сохранённому поиску —
+        // без staticReject и competition-отсева (кроме bids > 50 внутри markAlertSeen).
+        const freshAlerts = await markAlertSeen(env, alertSeen);
+        for (const order of freshAlerts) {
+          order.competition = classifyCompetition(order.bids);
+        }
+        stats.alertsFresh = freshAlerts.length;
+        log("alerts.fresh", { fresh: freshAlerts.length });
+        ordersToScore.push(...freshAlerts);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        stats.errors.push(message);
+        await logError(env, "alerts.error", { message });
+      }
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    stats.errors.push(message);
+    await logError(env, "alerts.error", { message });
+  }
+
   const niches = pickNiches(NICHES, cfg.nichesPerTick);
   stats.niches = niches.length;
   log("niches.picked", { ids: niches.map((n) => n.id) });
@@ -89,25 +151,24 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     if (errors.length > 0) {
       await alert(env, `Freelancer API errors: ${errors.join(" | ")}`);
     }
-    await finishTick(env, stats, startedAt);
-    return stats;
+  } else {
+    const { fresh, rejectedCount, seenCount, byReason } = await processOrders(env, orders);
+    stats.seen = seenCount;
+    stats.rejected = rejectedCount;
+    stats.fresh = fresh.length;
+    log("dedup.done", { fetched: orders.length, fresh: fresh.length, seen: seenCount });
+    log("filters.done", { rejected: rejectedCount, byReason });
+    ordersToScore.push(...fresh);
   }
 
-  const { fresh, rejectedCount, seenCount, byReason } = await processOrders(env, orders);
-  stats.seen = seenCount;
-  stats.rejected = rejectedCount;
-  stats.fresh = fresh.length;
-  log("dedup.done", { fetched: orders.length, fresh: fresh.length, seen: seenCount });
-  log("filters.done", { rejected: rejectedCount, byReason });
-
-  if (fresh.length === 0) {
+  if (ordersToScore.length === 0) {
     await finishTick(env, stats, startedAt);
     return stats;
   }
 
   let llmBroken = false;
 
-  for (const order of fresh) {
+  for (const order of ordersToScore) {
     if (llmBroken) {
       const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
       await sendTelegram(env, card);
@@ -170,6 +231,11 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       await sendTelegram(env, card, keyboard);
       if (score.verdict === "BID") {
         await saveBidCard(env, order);
+        try {
+          await placeBid(env, order, score, bidText);
+        } catch (e) {
+          console.error("placeBid failed:", e);
+        }
       }
       stats.notified += 1;
       await logImportant(env, "order.notified", {
@@ -356,6 +422,30 @@ async function handleSetWebhook(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ webhookUrl, result });
 }
 
+async function handleFlAuth(request: Request, env: Env): Promise<Response> {
+  const AUTH_KV_KEY = "fl:auth";
+  if (request.method === "GET") {
+    const raw = await env.ORDERS_KV.get(AUTH_KV_KEY);
+    return jsonResponse({ overrideSet: raw !== null });
+  }
+  if (request.method === "POST") {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    const { userId, hash } = (body ?? {}) as { userId?: unknown; hash?: unknown };
+    if (typeof userId !== "string" || userId === "" || typeof hash !== "string" || hash === "") {
+      return jsonResponse({ error: "body must be {userId: string, hash: string}" }, 400);
+    }
+    await env.ORDERS_KV.put(AUTH_KV_KEY, JSON.stringify({ userId, hash }));
+    log("fl.auth.override-set", {});
+    return jsonResponse({ ok: true });
+  }
+  return new Response("Not Found", { status: 404 });
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -385,6 +475,9 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/test/logs") {
         return jsonResponse(await readRing(env));
+      }
+      if (url.pathname === "/admin/fl-auth") {
+        return await handleFlAuth(request, env);
       }
     } catch (e) {
       return jsonResponse({ error: String(e) }, 500);

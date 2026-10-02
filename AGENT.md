@@ -2,11 +2,11 @@
 
 ## What this is
 
-Cloudflare Worker (TypeScript) that monitors Freelancer.com for new orders in 12 niches, filters and LLM-scores them (Kimi API), and sends Telegram cards with a bid draft. Cron tick: every minute. KV namespace `ORDERS_KV` is used for dedup state.
+Cloudflare Worker (TypeScript) that monitors Freelancer.com for new orders in 12 niches, filters and LLM-scores them (Kimi API), and sends Telegram cards with a bid draft. Cron tick: every minute. Dedup state (`seen`) lives in D1 (`DB` binding); KV namespace `ORDERS_KV` is used for ring logs, bid cards, and alert/ping flags.
 
 ## Hard rules (never violate)
 
-1. **No auto-bidding.** The worker only monitors and sends cards. A human submits every bid manually. Do not add any code that posts bids or applies to projects.
+1. **No auto-bidding.** The worker only monitors and sends cards. A human submits every bid manually. `src/bidder.ts` is a logging-only stub: with `AUTOBID_ENABLED=false` (default) it does nothing; even when enabled it only logs. Do not add any code that actually posts bids or applies to projects.
 2. **Secrets never in the repo.** `KIMI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_TOKEN` exist only as Worker secrets / `.dev.vars` (gitignored). Never commit them, never log them.
 3. **Never commit `.dev.vars`.** Example file: `.dev.vars.example`.
 4. Repo is public. Treat anything added to git as published.
@@ -28,8 +28,10 @@ CI (GitHub Actions) deploys on every push to `main`: `npm ci` → `npm run typec
 Pipeline per cron tick (4 layers), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*`
-- `parser.ts` — Freelancer API → `Order[]` (`fetchAllNiches`); бюджеты пересчитываются в USD через `currency.exchange_rate`, оригинальные суммы и код валюты сохраняются для карточки
-- `service.ts` — KV dedup (`seen:*`), static filters (bids, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min). Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM
+- `parser.ts` — Freelancer API → `Order[]` (`fetchAllNiches` + `fetchProjectsByIds` для alert-канала, фильтр `projects[]`, не `ids[]`); бюджеты пересчитываются в USD через `currency.exchange_rate`, оригинальные суммы и код валюты сохраняются для карточки
+- `sources/freelancer-alerts.ts` — второй канал: saved-search alerts (`GET https://www.freelancer.com/ajax-api/navigation/recent-saved-search-alerts.php`, заголовок `freelancer-auth-v2: <userId>;<hash>` + `freelancer-app-name/platform`). Обрабатываются только записи `type==="single"` (есть `project_id`), курсор — KV `alerts:last_ts` (unix sec, только `time_updated > lastTs`). Bootstrap: ключа нет → курсор = now, пустой результат (бэклог не тащим). 401/UNAUTHORIZED → `authFailed` → Telegram-alert с throttle KV `alerts:auth_alerted` (TTL 1ч). Auth: KV `fl:auth` (`{userId, hash}`) перекрывает env `FL_USER_ID`/`FL_AUTH_HASH`, задаётся через `POST /admin/fl-auth` (X-Admin-Token); `GET /admin/fl-auth` → `{overrideSet}` без значений
+- `service.ts` — D1 dedup (table `seen`: id/source/status/reason/ts, retention 30 days, daily cleanup), static filters (bids > 50 — жёсткий отсев на обоих каналах, language, fulltime, deadline), niche rotation (`pickNiches`, 4 niches/tick, full pass 3 min). Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM. Alert-заказы идут тем же дедупом, без staticReject (Freelancer уже отфильтровал по сохранённому поиску), кроме bids > 50 — `markAlertSeen` возвращает прошедшие заказы и пишет source `alert`
+- `bidder.ts` — авто-отклик заглушка: при `AUTOBID_ENABLED=false` только логирует `autobid.skipped`; реального размещения ставок нет
 - `kimi.ts` — LLM scoring, JSON-schema output, retries, validation
 - `prompts.ts` — scoring prompts; operator-facing fields (`reason`, `red_flags`, `check_manually`, `deadline_caveat`, `summary_ru`) are written in Russian by design
 - `telegram.ts` — cards sent as they come (no rate limit), alerts throttled to 1/hour
@@ -63,6 +65,8 @@ The webhook must be registered once after deploy (or after the worker URL change
 
 ```
 POST /test/set-webhook   (header X-Admin-Token) — calls Telegram setWebhook on https://<origin>/tg-webhook/<ADMIN_TOKEN>
+POST /admin/fl-auth      — body {userId, hash}: горячая замена freelancer-auth-v2 без редеплоя (KV `fl:auth`, без TTL)
+GET  /admin/fl-auth      — {overrideSet: boolean}, значения не отдаются
 ```
 
 ## Testing
@@ -79,7 +83,8 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 
 ## Operational notes
 
-- **KV free tier = 1000 put / 1000 list / 100k read ops per day** (daily, not monthly). The code is shaped around this: niche rotation is time-based (no KV), the ring log buffers info entries in isolate memory and flushes once per tick with activity (`flushLogBuffer` at the end of `runTick`), unapplied-bid ping runs at most every 15 minutes, `markStatus` does not exist (status trail lives in the ring log). When adding KV writes, count them against the daily budget.
+- **KV free tier = 1000 put / 1000 list / 100k read ops per day** (daily, not monthly). The code is shaped around this: niche rotation is time-based (no KV), the ring log buffers info entries in isolate memory and flushes once per tick with activity (`flushLogBuffer` at the end of `runTick`), unapplied-bid ping runs at most every 15 minutes, `markStatus` does not exist (status trail lives in the ring log). Seen-dedup was moved to D1 (`migrations/0001_seen.sql`) precisely because KV puts exceeded the free tier; only one KV write per day remains for the seen-cleanup flag (`seen:cleanup:last`). When adding KV writes, count them against the daily budget.
+- **D1 limits:** max 100 bound parameters per query — dedup batches accordingly (SELECT by ≤100 id, INSERT ≤20 rows). Remote migration applied via `wrangler d1 migrations apply freelancer-monitor --remote`.
 - First deploy of a fresh clone: create KV namespace, set the 4 secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.
 - Alerts are rate-limited on purpose (1/hour) — don't bypass the limit when changing `telegram.ts`. Card sending is intentionally unlimited.

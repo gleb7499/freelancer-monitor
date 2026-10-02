@@ -113,6 +113,7 @@ function normalizeProject(project: FreelancerProject, nicheId: string): Order {
       recruiter: bool("recruiter"),
     },
     prepaid_milestone: !!project.active_prepaid_milestone,
+    source: "search",
   };
 }
 
@@ -175,6 +176,46 @@ export async function fetchNicheOrders(env: Env, niche: Niche): Promise<Order[]>
   }
 
   return [...byId.values()];
+}
+
+export async function fetchProjectsByIds(env: Env, ids: number[]): Promise<Order[]> {
+  if (ids.length === 0) return [];
+  const config = getConfig(env);
+  const url = new URL(`${config.freelancerBase}/projects/`);
+  for (const id of ids) url.searchParams.append("projects[]", String(id));
+  url.searchParams.set("full_description", "true");
+  url.searchParams.set("compact", "true");
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new ParserError(`fetch failed for project ids: ${String(error)}`);
+  }
+
+  if (!response.ok) {
+    throw new ParserError(`HTTP ${response.status} for project ids`);
+  }
+
+  let data: FreelancerResponse;
+  try {
+    data = (await response.json()) as FreelancerResponse;
+  } catch (error) {
+    throw new ParserError(`invalid JSON for project ids: ${String(error)}`);
+  }
+
+  if (data.status !== "success" || !data.result) {
+    throw new ParserError("API status not success for project ids");
+  }
+
+  return (data.result.projects ?? []).map((project) => {
+    const order = normalizeProject(project, "alerts");
+    order.source = "alert";
+    return order;
+  });
 }
 
 export async function fetchAllNiches(

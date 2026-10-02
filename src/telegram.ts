@@ -71,17 +71,15 @@ export function formatOrderCard(
 
   const parts: string[] = [];
   const typeLabel = order.type === "hourly" ? "hourly" : "fixed";
-  parts.push(`💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
+  parts.push(`${order.source === "alert" ? "📡 alert" : "🔎 search"} — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
   parts.push(`💰 Бюджет: ${budgetLine(order)}`);
   const avgPart = order.bid_avg != null ? ` (ср. $${order.bid_avg})` : "";
   const compPart =
-    order.competition === "extreme"
-      ? " — 🔥 >50 bids — длинная дистанция"
-      : order.competition === "high"
-        ? " — конкуренция высокая"
-        : order.competition === "normal"
-          ? " — конкуренция обычная"
-          : "";
+    order.competition === "high"
+      ? " — конкуренция высокая"
+      : order.competition === "normal"
+        ? " — конкуренция обычная"
+        : "";
   parts.push(`👥 Откликов: ${order.bids}${avgPart}${compPart}`);
   parts.push(`📝 Суть: ${values.SUMMARY}`);
 
@@ -178,7 +176,7 @@ export function formatRawCard(order: Order, note: string): string {
 
   const parts: string[] = [];
   const typeLabel = order.type === "hourly" ? "hourly" : "fixed";
-  parts.push(`💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
+  parts.push(`${order.source === "alert" ? "📡 alert" : "🔎 search"} — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
   parts.push(`💰 Бюджет: ${budgetLine(order)}`);
   const avgPart = order.bid_avg != null ? ` (ср. $${order.bid_avg})` : "";
   parts.push(`👥 Откликов: ${order.bids}${avgPart}`);

@@ -17,7 +17,7 @@ export interface Order {
   language: string;
   submit_ts: number;
   deadline_hint: string | null;
-  competition: "normal" | "high" | "extreme" | null;
+  competition: "normal" | "high" | null;
   hidebids: boolean;
   is_escrow_project: boolean;
   time_free_bids_expire: number | null;
@@ -31,6 +31,7 @@ export interface Order {
     recruiter: boolean;
   };
   prepaid_milestone: boolean;
+  source?: "alert" | "search";
 }
 
 export interface Hours {
@@ -58,6 +59,7 @@ export type UpgradeId = "sealed" | "highlight" | "sponsored";
 
 export interface Env {
   ORDERS_KV: KVNamespace;
+  DB: D1Database;
   KIMI_API_KEY: string;
   KIMI_API_BASE: string;
   KIMI_MODEL: string;
@@ -65,9 +67,11 @@ export interface Env {
   TELEGRAM_CHAT_ID: string;
   ADMIN_TOKEN: string;
   FREELANCER_API_BASE: string;
-  MAX_BIDS: string;
   DEFAULT_WEEKLY_LIMIT: string;
   NICHES_PER_TICK: string;
+  AUTOBID_ENABLED: string;
+  FL_USER_ID: string;
+  FL_AUTH_HASH: string;
 }
 
 export interface Niche {

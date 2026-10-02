@@ -13,12 +13,14 @@ function stripTrailingSlash(value: string): string {
 
 export function getConfig(env: Env) {
   return {
-    maxBids: num(env, "MAX_BIDS", 15),
     weeklyLimitHours: num(env, "DEFAULT_WEEKLY_LIMIT", 40),
     nichesPerTick: num(env, "NICHES_PER_TICK", 4),
     kimiBase: stripTrailingSlash(env.KIMI_API_BASE ?? ""),
     kimiModel: env.KIMI_MODEL ?? "",
     freelancerBase: stripTrailingSlash(env.FREELANCER_API_BASE ?? ""),
+    autobidEnabled: env.AUTOBID_ENABLED === "true",
+    flUserId: (env.FL_USER_ID ?? "").trim(),
+    flAuthHash: (env.FL_AUTH_HASH ?? "").trim(),
   };
 }
 
