@@ -128,8 +128,13 @@ export async function fetchAlertLeads(env: Env): Promise<AlertLeadsResult> {
 
   // Курсор пишем только при новых алертах — иначе 1440 KV put/сутки
   // (тик каждую минуту) съедают free-лимит 1000 put/сутки.
+  // try/catch: при исчерпании KV-лимита тик не должен терять лиды.
   if (maxTs > lastTs) {
-    await env.ORDERS_KV.put(CURSOR_KEY, String(maxTs));
+    try {
+      await env.ORDERS_KV.put(CURSOR_KEY, String(maxTs));
+    } catch (e) {
+      console.warn("alerts cursor put failed:", e);
+    }
   }
   return { leads, error: null, authFailed: false };
 }
