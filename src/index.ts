@@ -154,86 +154,139 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     );
   }
 
-  let llmBroken = false;
+  // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
+  // циклом score → bidText → placeBid → карточка. Пул лимитирует одновременные
+  // LLM-вызовы (3) чтобы не провоцировать Kimi 429.
+  const bidCtx: { reserved: number } = { reserved: 0 };
 
-  for (const order of ordersToScore) {
-    if (llmBroken) break;
-
-    try {
-      let score = await scoreOrder(env, order);
-
-      if (score === null) {
-        await logError(env, "order.error", { id: order.id, err: "scoring-parse-failed" });
-        continue;
-      }
-
-      clampWeeklyLimit(score, cfg);
-
-      await logImportant(env, "llm.verdict", {
-        id: order.id,
-        verdict: score.verdict,
-        reason: score.reason,
-        bid_amount: score.bid_amount,
-        net_amount: score.net_amount,
-        value_score: score.value_score,
-      });
-
-      if (score.verdict === "PASS") {
-        stats.llmPass += 1;
-        continue;
-      }
-
-      const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-      let removedUpgrades: UpgradeId[] = [];
-      if (cap.removed.length > 0) {
-        score.take_upgrades = cap.kept;
-        removedUpgrades = cap.removed;
-      }
-
-      let bidText: string | null = null;
-      try {
-        bidText = await generateBidText(env, buildBidMessages(order, score));
-      } catch (e) {
-        console.error("generateBidText failed:", e);
-      }
-
-      const bidResult = await placeBid(env, order, score, bidText);
-
-      const card = formatOrderCard(order, score, bidText, removedUpgrades);
-      let header: string;
-      if (mode === "test") {
-        header = `[TEST] ставка НЕ отправлена`;
-      } else if (bidResult.placed) {
-        const upgradesPart =
-          score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
-        header = `✅ Отклик отправлен: $${score.bid_amount}, апгрейды: ${upgradesPart}`;
-      } else {
-        header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
-      }
-      await sendTelegram(env, `${header}\n\n${card}`);
-      stats.bidCards += 1;
-      await logImportant(env, "order.notified", {
-        id: order.id,
-        title: order.title.slice(0, 80),
-        bid: score.bid_amount,
-        net: score.net_amount,
-        placed: bidResult.placed,
-      });
-    } catch (e) {
-      if (e instanceof KimiError && e.status === 429) {
-        llmBroken = true;
-        await logError(env, "order.error", { id: order.id, err: "kimi-429" });
-        continue;
-      }
-      console.error(`order ${order.id} processing failed:`, e);
-      await logError(env, "order.error", { id: order.id, err: String(e).slice(0, 200) });
-    }
-  }
+  const results = await runWithConcurrency(ordersToScore, 3, async (order) => {
+    const outcome = await processOrder(env, order, cfg, mode, bidsBalance, bidCtx);
+    if (outcome === "pass") stats.llmPass += 1;
+    else if (outcome === "bid") stats.bidCards += 1;
+  });
+  void results;
 
   stats.scored = stats.llmPass + stats.bidCards;
   await finishTick(env, stats, startedAt);
   await flushLogBuffer(env);
   return stats;
+}
+
+type OrderOutcome = "bid" | "pass" | "error";
+
+interface BidReservation {
+  reserved: number;
+}
+
+async function processOrder(
+  env: Env,
+  order: Order,
+  cfg: Config,
+  mode: Mode,
+  bidsBalance: number | null,
+  bidCtx: BidReservation,
+): Promise<OrderOutcome> {
+  try {
+    const score = await scoreOrder(env, order);
+
+    if (score === null) {
+      await logError(env, "order.error", { id: order.id, err: "scoring-parse-failed" });
+      return "error";
+    }
+
+    clampWeeklyLimit(score, cfg);
+
+    await logImportant(env, "llm.verdict", {
+      id: order.id,
+      verdict: score.verdict,
+      reason: score.reason,
+      bid_amount: score.bid_amount,
+      net_amount: score.net_amount,
+      value_score: score.value_score,
+    });
+
+    if (score.verdict === "PASS") {
+      return "pass";
+    }
+
+    // Общий bids-баланс: защита от перерасхода внутри батча.
+    // bidsBalance — снимок до пула; reserved — BID'ы этого тика.
+    if (bidsBalance !== null && bidsBalance - bidCtx.reserved <= 0) {
+      bidCtx.reserved += 1;
+      await sendTelegram(env, `⚠️ Отклик НЕ отправлен: bids exhausted in tick\n\n${formatOrderCard(order, score, null, [])}`);
+      await logImportant(env, "order.notified", {
+        id: order.id,
+        title: order.title.slice(0, 80),
+        placed: false,
+        reason: "bids-exhausted-in-tick",
+      });
+      return "bid";
+    }
+    bidCtx.reserved += 1;
+
+    const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
+    let removedUpgrades: UpgradeId[] = [];
+    if (cap.removed.length > 0) {
+      score.take_upgrades = cap.kept;
+      removedUpgrades = cap.removed;
+    }
+
+    let bidText: string | null = null;
+    try {
+      bidText = await generateBidText(env, buildBidMessages(order, score));
+    } catch (e) {
+      console.error("generateBidText failed:", e);
+    }
+
+    const bidResult = await placeBid(env, order, score, bidText);
+
+    const card = formatOrderCard(order, score, bidText, removedUpgrades);
+    let header: string;
+    if (mode === "test") {
+      header = `[TEST] ставка НЕ отправлена`;
+    } else if (bidResult.placed) {
+      const upgradesPart =
+        score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
+      header = `✅ Отклик отправлен: $${score.bid_amount}, апгрейды: ${upgradesPart}`;
+    } else {
+      header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
+    }
+    await sendTelegram(env, `${header}\n\n${card}`);
+    await logImportant(env, "order.notified", {
+      id: order.id,
+      title: order.title.slice(0, 80),
+      bid: score.bid_amount,
+      net: score.net_amount,
+      placed: bidResult.placed,
+    });
+    return "bid";
+  } catch (e) {
+    // 429 и прочие — падает только этот заказ, остальные в пуле продолжают.
+    console.error(`order ${order.id} processing failed:`, e);
+    await logError(env, "order.error", {
+      id: order.id,
+      err: e instanceof KimiError && e.status === 429 ? "kimi-429" : String(e).slice(0, 200),
+    });
+    return "error";
+  }
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next;
+      next += 1;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function finishTick(env: Env, stats: TickStats, startedAt: number): Promise<void> {
