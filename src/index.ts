@@ -10,7 +10,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
+import { formatOrderCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
@@ -82,6 +82,14 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length });
       ordersToScore.push(...kept);
+      // Test-режим: уведомляем и об отклонённых гейтом (причина — bids>5).
+      if (mode === "test") {
+        const keptIds = new Set(kept.map((o) => o.id));
+        for (const order of fresh) {
+          if (keptIds.has(order.id)) continue;
+          await sendTelegram(env, `[TEST] гейт bids>5\n\n${formatRejectCard(order, `уже ${order.bids} откликов (лимит ≤5 до LLM)`)}`);
+        }
+      }
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -118,6 +126,11 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   if (bidsBalance === 0) {
     log("tick.idle-no-bids", { pending: ordersToScore.length });
     await markRejected(env, ordersToScore, "rej:no-bids");
+    if (mode === "test") {
+      for (const order of ordersToScore) {
+        await sendTelegram(env, `[TEST] нет bids на балансе\n\n${formatRejectCard(order, "bids = 0 — заказ пропущен до восстановления")}`);
+      }
+    }
     await finishTick(env, stats, startedAt);
     await flushLogBuffer(env);
     return stats;
@@ -186,6 +199,10 @@ async function processOrder(
     });
 
     if (score.verdict === "PASS") {
+      // Test-режим: PASS тоже уведомляем — для анализа качества скоринга.
+      if (mode === "test") {
+        await sendTelegram(env, `[TEST] PASS\n\n${formatOrderCard(order, score, null)}`);
+      }
       return "pass";
     }
 

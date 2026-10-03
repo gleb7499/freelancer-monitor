@@ -74,11 +74,17 @@ export function formatOrderCard(
   parts.push(`👥 Откликов: ${order.bids}${avgPart}`);
   parts.push(`📝 Суть: ${values.SUMMARY}`);
 
+  const rateBase =
+    score.verdict === "BID"
+      ? score.bid_amount
+      : (order.budget_min + order.budget_max) / 2;
   parts.push(
-    `🎯 Value: ${score.value_score}/100 (~$${Math.round(score.bid_amount / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
+    `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBase / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
   );
   parts.push(`✅ Вердикт: ${score.verdict} — ${values.REASON}`);
-  parts.push(`💵 Ставка: $${score.bid_amount} → на руки $${score.net_amount}`);
+  if (score.verdict === "BID") {
+    parts.push(`💵 Ставка: $${score.bid_amount} → на руки $${score.net_amount}`);
+  }
   if (order.type === "hourly" && score.weekly_limit_hours !== null) {
     parts.push(`⏱ Weekly limit: ${score.weekly_limit_hours} ч/нед`);
   }
@@ -121,7 +127,6 @@ export function formatOrderCard(
   parts.push(`🔗 <a href="${escHtml(order.url)}">Открыть заказ</a>`);
 
   let text = parts.join("\n\n");
-
   // Shrink in priority order: summary, reason, flags, check_manually, then bid
   // as last resort. Text content only — tags (b/blockquote/a) stay paired.
   const shrinkTargets = [
@@ -159,6 +164,18 @@ export function formatOrderCard(
   }
 
   return text;
+}
+
+// Короткая карточка отказа на этапе до LLM (test-режим: объясняем причину).
+export function formatRejectCard(order: Order, reason: string): string {
+  const parts: string[] = [];
+  const typeLabel = order.type === "hourly" ? "hourly" : "fixed";
+  parts.push(`📡 ${order.source ?? "active"} — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
+  parts.push(`💰 Бюджет: ${budgetLine(order)}`);
+  parts.push(`👥 Откликов: ${order.bids}`);
+  parts.push(`⛔ Отклонён: ${escHtml(reason)}`);
+  parts.push(`🔗 <a href="${escHtml(order.url)}">Открыть заказ</a>`);
+  return parts.join("\n\n");
 }
 
 export async function sendTelegram(
