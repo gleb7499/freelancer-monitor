@@ -1,15 +1,18 @@
 import type { Env } from "./types";
+import { resolveAuth } from "./sources/freelancer-alerts";
 
-// Леджер ставок на D1 (таблица bid_ledger, миграция 0002_bid_ledger.sql).
-// Официальный API баланса bids требует OAuth (без токена — 401), поэтому
-// баланс восстанавливаем леджером:
-//   balance = lastKnown + floor((now - lastTs) / REGEN_MS) - spent, кап MAX_BIDS.
-// Модель ресурса: Plus-тариф — 100 bids/мес, реген 1 bid / 7.5 ч.
-// До первой команды setBalance баланс «неизвестен» (balance = null) —
-// скоринг работает без поднятия планки.
+// Баланс bids. Основной источник — read-only endpoint сайта
+// ajax-api/projects/getBidLimit.php (та же веб-авторизация freelancer-auth-v2,
+// что у alerts-канала): отдаёт bidsRemaining, bidLimit и bidRefreshTime
+// (секунды до следующего реген-бида). Официальный API баланс не отдаёт
+// (проверено: users/0.1/self и SDK). Fallback — леджер на D1
+// (миграция 0002_bid_ledger.sql): balance = lastKnown + реген 1/7.5ч, кап 100.
 
 const MAX_BIDS = 100;
 const REGEN_MS = 7.5 * 60 * 60 * 1000;
+const BID_LIMIT_URL =
+  "https://www.freelancer.com/ajax-api/projects/getBidLimit.php";
+const FETCH_TIMEOUT_MS = 10000;
 
 interface LedgerRow {
   id: number;
@@ -22,6 +25,49 @@ export interface BidsBalance {
   balance: number | null;
   nextBidInMinutes: number | null;
   source: "api" | "ledger";
+}
+
+interface BidLimitResponse {
+  status?: string;
+  result?: {
+    bidsRemaining?: number;
+    bidLimit?: number;
+    bidRefreshTime?: number;
+    unlimitedBids?: boolean;
+  };
+}
+
+async function fetchBidLimitApi(env: Env): Promise<BidsBalance | null> {
+  const auth = await resolveAuth(env);
+  if (auth === null) return null;
+  try {
+    const res = await fetch(`${BID_LIMIT_URL}?userId=${auth.userId}&compact=true`, {
+      headers: {
+        accept: "application/json",
+        "freelancer-app-name": "main",
+        "freelancer-app-platform": "web",
+        "freelancer-auth-v2": `${auth.userId};${auth.hash}`,
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as BidLimitResponse;
+    const r = data.result;
+    if (data.status !== "success" || !r || typeof r.bidsRemaining !== "number") {
+      return null;
+    }
+    return {
+      balance: r.bidsRemaining,
+      nextBidInMinutes:
+        typeof r.bidRefreshTime === "number" && r.bidRefreshTime > 0
+          ? Math.max(1, Math.round(r.bidRefreshTime / 60))
+          : null,
+      source: "api",
+    };
+  } catch (e) {
+    console.warn("getBidLimit fetch failed:", e);
+    return null;
+  }
 }
 
 async function lastRow(env: Env): Promise<LedgerRow | null> {
@@ -41,6 +87,9 @@ async function reconcile(env: Env): Promise<number | null> {
 }
 
 export async function getBidsBalance(env: Env): Promise<BidsBalance> {
+  const api = await fetchBidLimitApi(env);
+  if (api !== null) return api;
+
   const balance = await reconcile(env);
   if (balance === null) {
     return { balance: null, nextBidInMinutes: null, source: "ledger" };

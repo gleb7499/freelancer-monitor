@@ -37,7 +37,7 @@ interface AlertsResponse {
   result?: AlertsResponseItem[];
 }
 
-async function resolveAuth(env: Env): Promise<{ userId: string; hash: string } | null> {
+export async function resolveAuth(env: Env): Promise<{ userId: string; hash: string } | null> {
   try {
     const raw = await env.ORDERS_KV.get(AUTH_KEY);
     if (raw !== null) {

@@ -370,8 +370,9 @@ async function handleTgCommand(env: Env, text: string): Promise<void> {
     const balanceLine =
       balance.balance === null
         ? "баланс bids: неизвестен (задай: /setbids N)"
-        : `баланс bids: ${balance.balance}` +
+        : `баланс bids: ${balance.balance} [${balance.source}]` +
           (balance.nextBidInMinutes !== null ? ` (след. +1 через ${balance.nextBidInMinutes} мин)` : "");
+    log("tg.status", { mode, balance: balance.balance, source: balance.source });
     await sendTelegram(
       env,
       [`режим: ${mode}`, balanceLine, `seen за 24ч:`, ...lines].join("\n"),
