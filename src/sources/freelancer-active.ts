@@ -5,10 +5,10 @@ import { normalizeProject, type FreelancerProject } from "../parser";
 // Официальный intake: публичный API projects/active (без auth, без кук).
 // Те же фильтры, что у saved search «Main Search»: 11 скиллов, fixed+hourly,
 // английский, сортировка по свежести. Курсор — по submitdate (unix sec).
-// Опрос не чаще POLL_MIN_INTERVAL_MS (рекомендация доков ~60 с; держим 25 с).
+// Опрос — каждый тик DO (10 с); throttle защищает от двойных запросов внутри тика.
 const SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
 const FETCH_TIMEOUT_MS = 15000;
-const POLL_MIN_INTERVAL_MS = 25_000;
+const POLL_MIN_INTERVAL_MS = 10_000;
 const LIMIT = 25;
 const CURSOR_KEY = "active:last_submit";
 const LAST_FETCH_KEY = "active:last_fetch";

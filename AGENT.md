@@ -2,7 +2,7 @@
 
 ## What this is
 
-Cloudflare Worker (TypeScript) that monitors Freelancer.com via the official public **projects/active** API (poll every 25 s, 11 skills, newest first), enriches and LLM-scores new orders (Kimi API), and places bids automatically through the official Freelancer API. Tick loop: Durable Object `TickScheduler` alarm every 10 s (cron `* * * * *` is only a watchdog that wakes the DO if the alarm chain broke). Dedup state (`seen`) and the bids ledger (`bid_ledger`) live in D1 (`DB` binding); KV namespace `ORDERS_KV` holds the ring-log buffer, alert/ping throttle flags, web-auth override (для getBidLimit), and the bid mode (`test` | `live` | `off`, default `test`).
+Cloudflare Worker (TypeScript) that monitors Freelancer.com via the official public **projects/active** API (poll every 10 s, 11 skills, newest first), enriches and LLM-scores new orders (Kimi API), and places bids automatically through the official Freelancer API. Tick loop: Durable Object `TickScheduler` alarm every 10 s (cron `* * * * *` is only a watchdog that wakes the DO if the alarm chain broke). Dedup state (`seen`) and the bids ledger (`bid_ledger`) live in D1 (`DB` binding); KV namespace `ORDERS_KV` holds the ring-log buffer, alert/ping throttle flags, web-auth override (для getBidLimit), and the bid mode (`test` | `live` | `off`, default `test`).
 
 ## Modes and hard rules
 
