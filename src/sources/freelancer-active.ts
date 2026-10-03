@@ -31,7 +31,7 @@ export interface ActiveOrdersResult {
 export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
   const empty: ActiveOrdersResult = { orders: [], skipped: false, error: null };
 
-  // Throttle: тик каждые 10 с, а опрашивать API — не чаще раза в 25 с.
+  // Throttle: защита от повторного запроса внутри одного тика (DO тикает каждые 10 с).
   try {
     const lastFetchRaw = await env.ORDERS_KV.get(LAST_FETCH_KEY);
     const lastFetch = lastFetchRaw === null ? 0 : Number(lastFetchRaw);
