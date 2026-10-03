@@ -17,7 +17,7 @@ bindings = [{ name = "TICK_SCHEDULER", class_name = "TickScheduler" }]
 # Миграция класса Durable Object (не путать с migrations/ — те для D1).
 [[migrations]]
 tag = "v1"
-new_classes = ["TickScheduler"]
+new_sqlite_classes = ["TickScheduler"]
 
 [triggers]
 crons = ["* * * * *"]
