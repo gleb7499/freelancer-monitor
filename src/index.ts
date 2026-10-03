@@ -10,7 +10,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, sendTelegram, alert, setWebhook } from "./telegram";
+import { formatOrderCard, sendTelegram, alert, setWebhook, answerCallbackQuery } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
@@ -398,7 +398,22 @@ interface TelegramUpdate {
     chat?: { id?: number | string };
     text?: string;
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: { chat?: { id?: number | string } };
+  };
 }
+
+const MODE_KEYBOARD = {
+  inline_keyboard: [
+    [
+      { text: "🧪 test", callback_data: "mode:test" },
+      { text: "🚀 live", callback_data: "mode:live" },
+      { text: "⏸ off", callback_data: "mode:off" },
+    ],
+  ],
+};
 
 // Команды оператора из Telegram. Принимаем только от TELEGRAM_CHAT_ID.
 async function handleTgCommand(env: Env, text: string): Promise<void> {
@@ -410,7 +425,8 @@ async function handleTgCommand(env: Env, text: string): Promise<void> {
       await setMode(env, arg);
       await sendTelegram(env, `режим: ${arg}`);
     } else {
-      await sendTelegram(env, `режим: допустимы test|live|off, получено "${arg || "∅"}"`);
+      // Без аргумента — интерактивный выбор кнопками.
+      await sendTelegram(env, "Выбери режим:", MODE_KEYBOARD);
     }
     return;
   }
@@ -457,6 +473,26 @@ async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext
       );
     } else {
       console.warn("tg.webhook: ignored foreign chat", chatId);
+    }
+  }
+
+  const callback = update.callback_query;
+  if (callback?.id && typeof callback.data === "string") {
+    const cbChatId = callback.message?.chat?.id;
+    if (String(cbChatId) === env.TELEGRAM_CHAT_ID && callback.data.startsWith("mode:")) {
+      const selected = callback.data.slice("mode:".length);
+      log("tg.callback", { data: callback.data });
+      ctx.waitUntil(
+        (async () => {
+          if (selected === "test" || selected === "live" || selected === "off") {
+            await setMode(env, selected);
+            await answerCallbackQuery(env, callback.id, `режим: ${selected} ✅`);
+            await sendTelegram(env, `режим: ${selected}`);
+          } else {
+            await answerCallbackQuery(env, callback.id, "неизвестный режим");
+          }
+        })().catch((e) => console.error("tg.callback failed:", e)),
+      );
     }
   }
   return new Response("ok");

@@ -164,6 +164,7 @@ export function formatOrderCard(
 export async function sendTelegram(
   env: Env,
   text: string,
+  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
 ): Promise<void> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   let body: Record<string, unknown> = {
@@ -172,6 +173,7 @@ export async function sendTelegram(
     parse_mode: "HTML",
     disable_web_page_preview: false,
   };
+  if (replyMarkup !== undefined) body.reply_markup = replyMarkup;
   let res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -223,6 +225,20 @@ async function setMyCommands(env: Env): Promise<unknown> {
     signal: AbortSignal.timeout(15000),
   });
   return { status: res.status, body: await res.text() };
+}
+
+export async function answerCallbackQuery(
+  env: Env,
+  callbackQueryId: string,
+  text?: string,
+): Promise<void> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    signal: AbortSignal.timeout(15000),
+  });
 }
 
 export async function alert(env: Env, text: string): Promise<void> {
