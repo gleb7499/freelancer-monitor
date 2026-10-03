@@ -13,6 +13,8 @@ export interface Order {
   currency_sign: string;
   bids: number;
   bid_avg: number | null;
+  owner_id: number | null;
+  owner?: OwnerInfo | null;
   description: string;
   language: string;
   submit_ts: number;
@@ -53,9 +55,27 @@ export interface ScoreResult {
   delivery_days: number;
   deadline_caveat: string | null;
   take_upgrades: UpgradeId[];
+  value_score: number;
+  ai_hours: number;
 }
 
 export type UpgradeId = "sealed" | "highlight" | "sponsored";
+
+// Информация о заказчике (enrich.fetchOwnerInfo). Анонимный эндпоинт
+// users/0.1 не отдаёт payment_verified и открытые заказы — только OAuth.
+export interface OwnerInfo {
+  id: number;
+  username: string | null;
+  reputation_overall: number | null;
+  reviews: number | null;
+  completion_rate: number | null;
+  rehire_rate: number | null;
+  employer_overall: number | null;
+  employer_complete: number | null;
+  employer_rehire_rate: number | null;
+  payment_verified: null;
+  open_projects: null;
+}
 
 export interface Env {
   ORDERS_KV: KVNamespace;
@@ -68,15 +88,9 @@ export interface Env {
   ADMIN_TOKEN: string;
   FREELANCER_API_BASE: string;
   DEFAULT_WEEKLY_LIMIT: string;
-  NICHES_PER_TICK: string;
-  AUTOBID_ENABLED: string;
   FL_USER_ID: string;
   FL_AUTH_HASH: string;
-}
-
-export interface Niche {
-  id: string;
-  name: string;
-  queries: string[];
-  jobs: number[];
+  FL_OAUTH_TOKEN: string;
+  TARGET_HOURLY: string;
+  BID_MIN_SCORE: string;
 }

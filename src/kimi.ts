@@ -1,11 +1,13 @@
 import type { Env, Order, ScoreResult } from "./types";
-import { getConfig } from "./config";
+import { getConfig, type Config } from "./config";
 import {
   buildScoringSystemPrompt,
   SCORING_JSON_SCHEMA,
   BID_TEXT_SYSTEM_PROMPT,
   buildScoringUserMessage,
+  type ScoringContext,
 } from "./prompts";
+import { getBidsBalance } from "./bids-balance";
 
 export class KimiError extends Error {
   status?: number;
@@ -160,6 +162,21 @@ export function validateScore(s: any, order: Order): string[] {
   ) {
     errors.push("weekly_limit_hours must be a positive integer or null");
   }
+  if (
+    typeof s.value_score !== "number" ||
+    !Number.isFinite(s.value_score) ||
+    s.value_score < 0 ||
+    s.value_score > 100
+  ) {
+    errors.push("value_score must be a number in [0, 100]");
+  }
+  if (
+    typeof s.ai_hours !== "number" ||
+    !Number.isFinite(s.ai_hours) ||
+    s.ai_hours <= 0
+  ) {
+    errors.push("ai_hours must be a positive number");
+  }
   const UPGRADE_IDS = ["sealed", "highlight", "sponsored"];
   if (!Array.isArray(s.take_upgrades)) {
     errors.push("take_upgrades must be an array");
@@ -177,12 +194,30 @@ export function validateScore(s: any, order: Order): string[] {
   return errors;
 }
 
-function normalizeScore(s: any, order: Order): ScoreResult {
+function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   const bid = s.bid_amount as number;
   // Freelancer fee: fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
   // bid = 0 (PASS-заглушка) → fee/net = 0, без отрицательного net.
   const fee = bid <= 0 ? 0 : order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5);
   const net = Math.round((bid - fee) * 100) / 100;
+  // Кодовый пересчёт value_score — LLM-арифметике не доверяем.
+  // rate = net / ai_hours (USD/час с учётом AI-агентов); score = rate / targetHourly * 100.
+  let valueScore =
+    net > 0
+      ? Math.min(100, Math.round((net / s.ai_hours / cfg.targetHourly) * 100))
+      : 0;
+  let verdict: "BID" | "PASS" = s.verdict;
+  if (verdict === "BID" && valueScore < cfg.bidMinScore) {
+    console.warn("scoreOrder: BID force-passed by code recheck", {
+      id: order.id,
+      valueScore,
+      bidMinScore: cfg.bidMinScore,
+      net,
+      ai_hours: s.ai_hours,
+    });
+    verdict = "PASS";
+    valueScore = 0;
+  }
   let weeklyLimit: number | null = null;
   if (order.type === "hourly") {
     if (
@@ -194,7 +229,7 @@ function normalizeScore(s: any, order: Order): ScoreResult {
     }
   }
   return {
-    verdict: s.verdict,
+    verdict,
     reason: s.reason,
     summary_ru: s.summary_ru,
     hours: { opt: s.hours.opt, real: s.hours.real, pess: s.hours.pess },
@@ -206,6 +241,8 @@ function normalizeScore(s: any, order: Order): ScoreResult {
     delivery_days: s.delivery_days,
     deadline_caveat: s.deadline_caveat,
     take_upgrades: s.take_upgrades,
+    value_score: valueScore,
+    ai_hours: s.ai_hours,
   };
 }
 
@@ -230,9 +267,16 @@ async function chatWithRetries(
 
 export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | null> {
   const cfg = getConfig(env);
+  let bidsCtx: ScoringContext = { bidsBalance: null, nextBidInMinutes: null };
+  try {
+    const b = await getBidsBalance(env);
+    bidsCtx = { bidsBalance: b.balance, nextBidInMinutes: b.nextBidInMinutes };
+  } catch (e) {
+    console.warn("scoreOrder: bids balance unavailable", String(e));
+  }
   const messages = [
     { role: "system", content: buildScoringSystemPrompt(cfg) },
-    { role: "user", content: buildScoringUserMessage(order) },
+    { role: "user", content: buildScoringUserMessage(order, bidsCtx) },
   ];
   let useSchema = !jsonSchemaDegraded;
   let raw: string;
@@ -255,7 +299,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
   }
   let errors = parsed === undefined ? ["response is not valid JSON"] : validateScore(parsed, order);
   if (errors.length === 0) {
-    return normalizeScore(parsed, order);
+    return normalizeScore(parsed, order, cfg);
   }
   console.error("scoreOrder first-pass validation failed", {
     id: order.id,
@@ -299,7 +343,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     });
     return null;
   }
-  return normalizeScore(parsed, order);
+  return normalizeScore(parsed, order, cfg);
 }
 
 export function buildBidMessages(
