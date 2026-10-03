@@ -1,8 +1,7 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
-import { NICHES } from "./niches";
-import { fetchAllNiches, fetchProjectsByIds } from "./parser";
-import { processOrders, pickNiches, filterNew, classifyCompetition, markAlertSeen } from "./service";
+import { fetchProjectsByIds, fetchOwnerInfo } from "./enrich";
+import { filterNew, markAlertSeen, markRejected, seenStats24h } from "./service";
 import { fetchAlertLeads } from "./sources/freelancer-alerts";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
@@ -11,43 +10,30 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import {
-  formatOrderCard,
-  formatRawCard,
-  sendTelegram,
-  alert,
-  pingUnappliedBids,
-  saveBidCard,
-  answerCallbackQuery,
-  setWebhook,
-  appliedKey,
-  bidCardKey,
-} from "./telegram";
+import { formatOrderCard, sendTelegram, alert, setWebhook } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
+import { getMode, setMode, type Mode } from "./mode";
+import { getBidsBalance, setBalance } from "./bids-balance";
 
 interface TickStats {
-  niches: number;
-  fetched: number;
-  seen: number;
-  rejected: number;
-  fresh: number;
-  notified: number;
-  llmPass: number;
+  mode: Mode;
   alertsFetched: number;
   alertsFresh: number;
+  scored: number;
+  llmPass: number;
+  bidCards: number;
   errors: string[];
 }
 
 const AUTH_ALERT_KEY = "alerts:auth_alerted";
 const AUTH_ALERT_TTL_SEC = 3600;
+const BIDS_UNSET_ALERT_KEY = "bids:unset-alerted";
 
-async function sendAuthAlertOnce(env: Env, message: string): Promise<void> {
-  const already = await env.ORDERS_KV.get(AUTH_ALERT_KEY);
+async function sendAuthAlertOnce(env: Env, key: string, ttlSec: number, message: string): Promise<void> {
+  const already = await env.ORDERS_KV.get(key);
   if (already !== null) return;
-  await env.ORDERS_KV.put(AUTH_ALERT_KEY, String(Date.now()), {
-    expirationTtl: AUTH_ALERT_TTL_SEC,
-  });
+  await env.ORDERS_KV.put(key, String(Date.now()), { expirationTtl: ttlSec });
   await alert(env, message);
 }
 
@@ -59,47 +45,39 @@ function clampWeeklyLimit(score: ScoreResult, cfg: Config): void {
 }
 
 export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Promise<TickStats> {
-  const cfg = getConfig(env);
-  const startedAt = Date.now();
-  log("tick.start", { trigger });
+  const mode = await getMode(env);
   const stats: TickStats = {
-    niches: 0,
-    fetched: 0,
-    seen: 0,
-    rejected: 0,
-    fresh: 0,
-    notified: 0,
-    llmPass: 0,
+    mode,
     alertsFetched: 0,
     alertsFresh: 0,
+    scored: 0,
+    llmPass: 0,
+    bidCards: 0,
     errors: [],
   };
 
-  // Пинг неподтверждённых BID — раз в 15 минут: list-операции в KV
-  // лимитированы (free tier — 1000/сутки), а чаще проверять не нужно
-  // (порог пинга — 25 минут). Не пингуем сразу после старта тика?
-  // Порядок не важен: пинг отдельный от обработки заказов.
-  try {
-    const PING_INTERVAL_MS = 15 * 60 * 1000;
-    const raw = await env.ORDERS_KV.get("ping:last");
-    const last = raw === null ? 0 : Number(raw);
-    if (!Number.isFinite(last) || Date.now() - last >= PING_INTERVAL_MS) {
-      await env.ORDERS_KV.put("ping:last", String(Date.now()), { expirationTtl: 86400 });
-      await pingUnappliedBids(env);
-    }
-  } catch (e) {
-    console.error("pingUnappliedBids failed:", e);
+  // Режим off — ничего не делаем вообще.
+  if (mode === "off") {
+    log("tick.off", { trigger });
+    await flushLogBuffer(env);
+    return stats;
   }
+
+  const cfg = getConfig(env);
+  const startedAt = Date.now();
+  log("tick.start", { trigger, mode });
 
   const ordersToScore: Order[] = [];
 
-  // --- Alert-канал (saved search alerts) — независим от search, ошибки не роняют тик ---
+  // --- Единственный канал: saved search alerts ---
   try {
     const alerts = await fetchAlertLeads(env);
     if (alerts.authFailed) {
       log("alerts.authFailed", {});
       await sendAuthAlertOnce(
         env,
+        AUTH_ALERT_KEY,
+        AUTH_ALERT_TTL_SEC,
         "Протухла сессия Freelancer (alerts), обнови куки через /admin/fl-auth",
       );
     } else if (alerts.error !== null) {
@@ -114,12 +92,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
           alerts.leads.map((l) => l.projectId),
         );
         const alertSeen = await filterNew(env, alertOrders);
-        // Freelancer уже отфильтровал по сохранённому поиску —
-        // без staticReject и competition-отсева (кроме bids > 50 внутри markAlertSeen).
+        // Единственный статический гейт: bids > 5 (source alert внутри).
         const freshAlerts = await markAlertSeen(env, alertSeen);
-        for (const order of freshAlerts) {
-          order.competition = classifyCompetition(order.bids);
-        }
         stats.alertsFresh = freshAlerts.length;
         log("alerts.fresh", { fresh: freshAlerts.length });
         ordersToScore.push(...freshAlerts);
@@ -135,52 +109,61 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     await logError(env, "alerts.error", { message });
   }
 
-  const niches = pickNiches(NICHES, cfg.nichesPerTick);
-  stats.niches = niches.length;
-  log("niches.picked", { ids: niches.map((n) => n.id) });
-
-  const { orders, errors, perNiche } = await fetchAllNiches(env, niches);
-  stats.fetched = orders.length;
-  stats.errors = errors;
-  log("parser.done", { perNiche, total: orders.length, errors: errors.length });
-  for (const message of errors) {
-    await logError(env, "parser.error", { message });
-  }
-
-  if (orders.length === 0) {
-    if (errors.length > 0) {
-      await alert(env, `Freelancer API errors: ${errors.join(" | ")}`);
-    }
-  } else {
-    const { fresh, rejectedCount, seenCount, byReason } = await processOrders(env, orders);
-    stats.seen = seenCount;
-    stats.rejected = rejectedCount;
-    stats.fresh = fresh.length;
-    log("dedup.done", { fetched: orders.length, fresh: fresh.length, seen: seenCount });
-    log("filters.done", { rejected: rejectedCount, byReason });
-    ordersToScore.push(...fresh);
-  }
-
   if (ordersToScore.length === 0) {
     await finishTick(env, stats, startedAt);
+    await flushLogBuffer(env);
     return stats;
+  }
+
+  // Enrich: информация о заказчике уходит в JSON скорингу.
+  for (const order of ordersToScore) {
+    if (order.owner_id === null) continue;
+    try {
+      order.owner = await fetchOwnerInfo(env, order.owner_id);
+    } catch (e) {
+      order.owner = null;
+      console.warn("fetchOwnerInfo failed:", { id: order.id, err: String(e) });
+    }
+  }
+
+  // Гейт bids-баланса (D1-леджер).
+  let bidsBalance: number | null = null;
+  try {
+    const b = await getBidsBalance(env);
+    bidsBalance = b.balance;
+  } catch (e) {
+    console.warn("getBidsBalance failed:", String(e));
+  }
+
+  if (bidsBalance === 0) {
+    log("tick.idle-no-bids", { pending: ordersToScore.length });
+    await markRejected(env, ordersToScore, "rej:no-bids");
+    await finishTick(env, stats, startedAt);
+    await flushLogBuffer(env);
+    return stats;
+  }
+
+  if (bidsBalance === null) {
+    // Леджер не инициализирован — работаем без поднятия планки, но просим
+    // оператора задать баланс (не чаще раза в сутки).
+    await sendAuthAlertOnce(
+      env,
+      BIDS_UNSET_ALERT_KEY,
+      86400,
+      "Баланс bids неизвестен — укажи баланс: /setbids N",
+    );
   }
 
   let llmBroken = false;
 
   for (const order of ordersToScore) {
-    if (llmBroken) {
-      const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
-      await sendTelegram(env, card);
-      continue;
-    }
+    if (llmBroken) break;
 
     try {
       let score = await scoreOrder(env, order);
 
       if (score === null) {
-        const card = formatRawCard(order, "скоринг не распарсился — сырая карточка");
-        await sendTelegram(env, card);
+        await logError(env, "order.error", { id: order.id, err: "scoring-parse-failed" });
         continue;
       }
 
@@ -192,28 +175,19 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         reason: score.reason,
         bid_amount: score.bid_amount,
         net_amount: score.net_amount,
+        value_score: score.value_score,
       });
 
       if (score.verdict === "PASS") {
         stats.llmPass += 1;
-        // ВРЕМЕННО (debug): присылаем PASS-карточки для ручной проверки решений LLM.
-        // Удалить после отладки — вместе с этим блоком и пометкой в AGENT.md.
-        try {
-          const debugCard = formatOrderCard(order, score, null, []);
-          await sendTelegram(env, `🔍 DEBUG PASS\n${debugCard}`);
-        } catch (e) {
-          console.error("debug PASS card failed:", e);
-        }
         continue;
       }
 
+      const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
       let removedUpgrades: UpgradeId[] = [];
-      if (score.verdict === "BID") {
-        const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-        if (cap.removed.length > 0) {
-          score.take_upgrades = cap.kept;
-          removedUpgrades = cap.removed;
-        }
+      if (cap.removed.length > 0) {
+        score.take_upgrades = cap.kept;
+        removedUpgrades = cap.removed;
       }
 
       let bidText: string | null = null;
@@ -223,47 +197,40 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         console.error("generateBidText failed:", e);
       }
 
+      const bidResult = await placeBid(env, order, score, bidText);
+
       const card = formatOrderCard(order, score, bidText, removedUpgrades);
-      const keyboard =
-        score.verdict === "BID"
-          ? { inline_keyboard: [[{ text: "Откликнулся ✅", callback_data: `applied:${order.id}` }]] }
-          : undefined;
-      await sendTelegram(env, card, keyboard);
-      if (score.verdict === "BID") {
-        await saveBidCard(env, order);
-        try {
-          await placeBid(env, order, score, bidText);
-        } catch (e) {
-          console.error("placeBid failed:", e);
-        }
+      let header: string;
+      if (mode === "test") {
+        header = `[TEST] ставка НЕ отправлена`;
+      } else if (bidResult.placed) {
+        const upgradesPart =
+          score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
+        header = `✅ Отклик отправлен: $${score.bid_amount}, апгрейды: ${upgradesPart}`;
+      } else {
+        header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
       }
-      stats.notified += 1;
+      await sendTelegram(env, `${header}\n\n${card}`);
+      stats.bidCards += 1;
       await logImportant(env, "order.notified", {
         id: order.id,
         title: order.title.slice(0, 80),
         bid: score.bid_amount,
         net: score.net_amount,
+        placed: bidResult.placed,
       });
     } catch (e) {
       if (e instanceof KimiError && e.status === 429) {
-        await alert(env, "Kimi 429 rate window");
         llmBroken = true;
         await logError(env, "order.error", { id: order.id, err: "kimi-429" });
-        const card = formatRawCard(order, "LLM недоступен (429) — сырая карточка");
-        await sendTelegram(env, card);
         continue;
       }
       console.error(`order ${order.id} processing failed:`, e);
       await logError(env, "order.error", { id: order.id, err: String(e).slice(0, 200) });
-      try {
-        const card = formatRawCard(order, `ошибка обработки: ${String(e)}`);
-        await sendTelegram(env, card);
-      } catch (sendErr) {
-        console.error("raw card send failed:", sendErr);
-      }
     }
   }
 
+  stats.scored = stats.llmPass + stats.bidCards;
   await finishTick(env, stats, startedAt);
   await flushLogBuffer(env);
   return stats;
@@ -272,11 +239,10 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
 async function finishTick(env: Env, stats: TickStats, startedAt: number): Promise<void> {
   const durationMs = Date.now() - startedAt;
   log("tick.done", { stats, durationMs });
-  if (stats.fresh > 0 || stats.notified > 0 || stats.llmPass > 0 || stats.errors.length > 0) {
+  if (stats.alertsFresh > 0 || stats.bidCards > 0 || stats.errors.length > 0) {
     await logImportant(env, "tick.done-nonquiet", {
-      fresh: stats.fresh,
-      notified: stats.notified,
-      llmPass: stats.llmPass,
+      alertsFresh: stats.alertsFresh,
+      bidCards: stats.bidCards,
       errors: stats.errors.length,
       durationMs,
     });
@@ -324,14 +290,15 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ error: "invalid JSON body" }, 400);
     }
   } else {
-    const { orders, errors } = await fetchAllNiches(env, [NICHES[0]]);
-    if (orders.length === 0) {
-      return jsonResponse(
-        { error: "no live orders", parserErrors: errors },
-        404,
-      );
+    // Fallback: берём первый свежий алерт, если он есть.
+    const alerts = await fetchAlertLeads(env);
+    if (alerts.leads.length > 0) {
+      const orders = await fetchProjectsByIds(env, [alerts.leads[0].projectId]);
+      order = orders[0] ?? null;
     }
-    order = orders[0];
+    if (!order) {
+      return jsonResponse({ error: "no live orders (alerts empty)" }, 404);
+    }
   }
 
   try {
@@ -373,46 +340,79 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
   }
 }
 
-interface TelegramCallbackUpdate {
-  callback_query?: {
-    id: string;
-    data?: string;
+interface TelegramUpdate {
+  message?: {
+    chat?: { id?: number | string };
+    text?: string;
   };
+}
+
+// Команды оператора из Telegram. Принимаем только от TELEGRAM_CHAT_ID.
+async function handleTgCommand(env: Env, text: string): Promise<void> {
+  const trimmed = text.trim();
+
+  if (trimmed.startsWith("/mode")) {
+    const arg = trimmed.slice("/mode".length).trim();
+    if (arg === "test" || arg === "live" || arg === "off") {
+      await setMode(env, arg);
+      await sendTelegram(env, `режим: ${arg}`);
+    } else {
+      await sendTelegram(env, `режим: допустимы test|live|off, получено "${arg || "∅"}"`);
+    }
+    return;
+  }
+
+  if (trimmed === "/status") {
+    const mode = await getMode(env);
+    const balance = await getBidsBalance(env);
+    const stats = await seenStats24h(env);
+    const lines = stats.map((s) => `  ${s.status}/${s.source}: ${s.count}`);
+    const balanceLine =
+      balance.balance === null
+        ? "баланс bids: неизвестен (задай: /setbids N)"
+        : `баланс bids: ${balance.balance}` +
+          (balance.nextBidInMinutes !== null ? ` (след. +1 через ${balance.nextBidInMinutes} мин)` : "");
+    await sendTelegram(
+      env,
+      [`режим: ${mode}`, balanceLine, `seen за 24ч:`, ...lines].join("\n"),
+    );
+    return;
+  }
+
+  if (trimmed.startsWith("/setbids")) {
+    const arg = Number(trimmed.slice("/setbids".length).trim());
+    if (!Number.isFinite(arg) || arg < 0) {
+      await sendTelegram(env, "setbids: нужно неотрицательное число, напр. /setbids 80");
+      return;
+    }
+    await setBalance(env, arg);
+    const balance = await getBidsBalance(env);
+    await sendTelegram(env, `баланс зафиксирован: ${balance.balance}`);
+    return;
+  }
 }
 
 async function handleTgWebhook(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Not Found", { status: 404 });
   }
-  let update: TelegramCallbackUpdate;
+  let update: TelegramUpdate;
   try {
-    update = (await request.json()) as TelegramCallbackUpdate;
+    update = (await request.json()) as TelegramUpdate;
   } catch {
     return new Response("ok");
   }
-  const callback = update.callback_query;
-  if (callback?.id) {
-    if (typeof callback.data === "string" && callback.data.startsWith("applied:")) {
-      const id = Number(callback.data.slice("applied:".length));
-      if (Number.isFinite(id)) {
-        // Идемпотентно: повторное нажатие перезаписывает timestamp.
-        await env.ORDERS_KV.put(appliedKey(id), String(Date.now()), {
-          expirationTtl: 86400,
-        });
-        await env.ORDERS_KV.delete(bidCardKey(id));
-        log("tg.applied", { id });
-      }
+  const message = update.message;
+  const chatId = message?.chat?.id;
+  if (typeof message?.text === "string" && chatId !== undefined) {
+    if (String(chatId) === env.TELEGRAM_CHAT_ID) {
+      log("tg.command", { text: message.text });
+      await handleTgCommand(env, message.text);
+    } else {
+      console.warn("tg.webhook: ignored foreign chat", chatId);
     }
-    ctxAnswerCallback(env, callback.id);
   }
   return new Response("ok");
-}
-
-function ctxAnswerCallback(env: Env, callbackId: string): void {
-  // Ответ Telegram не блокирует обработку апдейта.
-  answerCallbackQuery(env, callbackId).catch((e) =>
-    console.warn("answerCallbackQuery failed:", e),
-  );
 }
 
 async function handleSetWebhook(request: Request, env: Env): Promise<Response> {
