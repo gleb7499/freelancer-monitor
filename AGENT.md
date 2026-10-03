@@ -2,7 +2,7 @@
 
 ## What this is
 
-Cloudflare Worker (TypeScript) that monitors Freelancer.com via the saved-search **alerts** channel, enriches and LLM-scores new orders (Kimi API), and places bids automatically through the official Freelancer API. Cron tick: every minute. Dedup state (`seen`) and the bids ledger (`bid_ledger`) live in D1 (`DB` binding); KV namespace `ORDERS_KV` holds the ring-log buffer, alert/ping throttle flags, alerts auth override, and the bid mode (`test` | `live` | `off`, default `test`).
+Cloudflare Worker (TypeScript) that monitors Freelancer.com via the saved-search **alerts** channel, enriches and LLM-scores new orders (Kimi API), and places bids automatically through the official Freelancer API. Tick loop: Durable Object `TickScheduler` alarm every 10 s (cron `* * * * *` is only a watchdog that wakes the DO if the alarm chain broke). Dedup state (`seen`) and the bids ledger (`bid_ledger`) live in D1 (`DB` binding); KV namespace `ORDERS_KV` holds the ring-log buffer, alert/ping throttle flags, alerts auth override, and the bid mode (`test` | `live` | `off`, default `test`).
 
 ## Modes and hard rules
 
@@ -29,7 +29,7 @@ CI (GitHub Actions) deploys on every push to `main`: `npm ci` → `npm run typec
 
 ## Architecture
 
-Pipeline per cron tick, all in `src/`:
+Pipeline per tick (every 10 s via DO alarm), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*` + Telegram webhook (`/tg-webhook/<ADMIN_TOKEN>`) with operator commands
 - `sources/freelancer-alerts.ts` — единственный канал: saved-search alerts (`GET https://www.freelancer.com/ajax-api/navigation/recent-saved-search-alerts.php`, заголовок `freelancer-auth-v2: <userId>;<hash>` + `freelancer-app-name/platform`). Обрабатываются только записи `type==="single"` (есть `project_id`), курсор — KV `alerts:last_ts` (unix sec, только `time_updated > lastTs`). Bootstrap: ключа нет → курсор = now, пустой результат (бэклог не тащим). 401/UNAUTHORIZED → `authFailed` → Telegram-alert с throttle KV `alerts:auth_alerted` (TTL 1ч). Auth: KV `fl:auth` (`{userId, hash}`) перекрывает env `FL_USER_ID`/`FL_AUTH_HASH`, задаётся через `POST /admin/fl-auth` (X-Admin-Token); `GET /admin/fl-auth` → `{overrideSet}` без значений

@@ -4,7 +4,7 @@ Cloudflare Worker (TypeScript) that watches Freelancer.com saved-search alerts, 
 
 ## How it works
 
-Minute-cron pipeline:
+Pipeline ticking every 10 s (Durable Object alarms; minute cron is a watchdog):
 
 ```
 [1] Alerts          saved-search alerts → project ids → fetchProjectsByIds
@@ -34,7 +34,7 @@ Minute-cron pipeline:
 
 ```
 src/
-  index.ts        — entry point: cron tick, /test/* endpoints, Telegram webhook
+  index.ts        — entry point: TickScheduler DO (10 s alarm loop), cron watchdog, /test/* endpoints, Telegram webhook
   config.ts       — env → typed config
   types.ts        — Order, ScoreResult, OwnerInfo, Env
   parser.ts       — normalizeProject (Freelancer project → Order)

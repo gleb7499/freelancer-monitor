@@ -86,6 +86,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   ADMIN_TOKEN: string;
+  TICK_SCHEDULER: DurableObjectNamespace;
   FREELANCER_API_BASE: string;
   DEFAULT_WEEKLY_LIMIT: string;
   FL_USER_ID: string;

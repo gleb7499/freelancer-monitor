@@ -440,6 +440,40 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
   return new Response("Not Found", { status: 404 });
 }
 
+// Durable Object — быстрый цикл тиков: cron в Workers не умеет чаще минуты,
+// поэтому runTick крутится на alarm-цепочке каждые TICK_INTERVAL_MS.
+// DO однопоточный: тики не перекрываются, следующий аларм ставится
+// по завершении предыдущего. Cron (1/мин) — сторож: будит DO, если цепочка
+// прервалась (деплой, ошибка инфраструктуры).
+const TICK_INTERVAL_MS = 10_000;
+
+export class TickScheduler {
+  constructor(
+    private readonly state: DurableObjectState,
+    private readonly env: Env,
+  ) {}
+
+  async fetch(): Promise<Response> {
+    // Сторож: ставим аларм только если его нет (не перезапускаем цепочку).
+    const existing = await this.state.storage.getAlarm();
+    if (existing === null) {
+      await this.state.storage.setAlarm(Date.now());
+    }
+    return new Response("ok");
+  }
+
+  async alarm(): Promise<void> {
+    try {
+      await runTick(this.env);
+    } catch (e) {
+      console.error("tick failed", e);
+    } finally {
+      // Цепочка не должна прерваться даже при исключении.
+      await this.state.storage.setAlarm(Date.now() + TICK_INTERVAL_MS);
+    }
+  }
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -484,8 +518,8 @@ export default {
   },
 
   scheduled(event, env, ctx): void {
-    ctx.waitUntil(
-      runTick(env).catch((e) => console.error("tick failed", e)),
-    );
+    // Watchdog: будим DO (если alarm-цепочка жива — no-op).
+    const stub = env.TICK_SCHEDULER.get(env.TICK_SCHEDULER.idFromName("main"));
+    ctx.waitUntil(stub.fetch("https://do.internal/wake").catch((e) => console.error("do wake failed", e)));
   },
 } satisfies ExportedHandler<Env>;
