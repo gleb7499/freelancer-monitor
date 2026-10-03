@@ -126,6 +126,10 @@ export async function fetchAlertLeads(env: Env): Promise<AlertLeadsResult> {
     if (item.time_updated > maxTs) maxTs = item.time_updated;
   }
 
-  await env.ORDERS_KV.put(CURSOR_KEY, String(maxTs));
+  // Курсор пишем только при новых алертах — иначе 1440 KV put/сутки
+  // (тик каждую минуту) съедают free-лимит 1000 put/сутки.
+  if (maxTs > lastTs) {
+    await env.ORDERS_KV.put(CURSOR_KEY, String(maxTs));
+  }
   return { leads, error: null, authFailed: false };
 }
