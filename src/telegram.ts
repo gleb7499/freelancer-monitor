@@ -204,7 +204,26 @@ export async function setWebhook(env: Env, webhookUrl: string): Promise<unknown>
     signal: AbortSignal.timeout(15000),
   });
   const text = await res.text();
-  return { status: res.status, body: text };
+  const commands = await setMyCommands(env);
+  return { status: res.status, body: text, commands };
+}
+
+// Меню команд бота (кнопка «/» в чате). BotFather не нужен — это Bot API.
+async function setMyCommands(env: Env): Promise<unknown> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      commands: [
+        { command: "mode", description: "Режим: /mode test | live | off" },
+        { command: "status", description: "Режим, баланс bids, статистика за сутки" },
+        { command: "setbids", description: "Установить баланс bids: /setbids 25" },
+      ],
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  return { status: res.status, body: await res.text() };
 }
 
 export async function alert(env: Env, text: string): Promise<void> {
