@@ -88,3 +88,21 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 - First deploy of a fresh clone: create KV namespace, set the 4 secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.
 - Alerts are rate-limited on purpose (1/hour) — don't bypass the limit when changing `telegram.ts`. Card sending is intentionally unlimited.
+
+<!-- serena-memory:v1 -->
+## Project Memory (Serena)
+
+This project uses the Serena MCP server for persistent project memory and
+symbol-level code navigation.
+
+- Memories live in `.serena/memories/*.md` (project overview, architecture,
+  conventions, commands, decisions). Read them before exploring the codebase
+  from scratch: call serena `list_memories`, then `read_memory` for what is
+  relevant. Trust them, but verify against the code when they look stale.
+- Prefer serena symbolic tools (`get_symbols_overview`, `find_symbol`,
+  `find_referencing_symbols`) over reading whole files — they are cheaper.
+- At the end of a session that changed architecture, module structure,
+  conventions, or key decisions, update the memories with `write_memory`.
+  Do not wait to be asked. Small code edits that change none of the above
+  need no memory update.
+- If memories are missing, run serena `onboarding` to regenerate them.
