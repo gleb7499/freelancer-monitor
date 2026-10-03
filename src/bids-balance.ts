@@ -1,5 +1,24 @@
 import type { Env } from "./types";
-import { resolveAuth } from "./sources/freelancer-alerts";
+import { getConfig } from "./config";
+
+// Веб-авторизация (freelancer-auth-v2) для read-only getBidLimit:
+// KV `fl:auth` (горячая замена через /admin/fl-auth) перекрывает env-секреты.
+async function resolveWebAuth(env: Env): Promise<{ userId: string; hash: string } | null> {
+  try {
+    const raw = await env.ORDERS_KV.get("fl:auth");
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as { userId?: unknown; hash?: unknown };
+      if (typeof parsed.userId === "string" && typeof parsed.hash === "string") {
+        return { userId: parsed.userId, hash: parsed.hash };
+      }
+    }
+  } catch (e) {
+    console.warn("fl:auth KV read failed:", e);
+  }
+  const cfg = getConfig(env);
+  if (cfg.flUserId === "" || cfg.flAuthHash === "") return null;
+  return { userId: cfg.flUserId, hash: cfg.flAuthHash };
+}
 
 // Баланс bids. Основной источник — read-only endpoint сайта
 // ajax-api/projects/getBidLimit.php (та же веб-авторизация freelancer-auth-v2,
@@ -38,7 +57,7 @@ interface BidLimitResponse {
 }
 
 async function fetchBidLimitApi(env: Env): Promise<BidsBalance | null> {
-  const auth = await resolveAuth(env);
+  const auth = await resolveWebAuth(env);
   if (auth === null) return null;
   try {
     const res = await fetch(`${BID_LIMIT_URL}?userId=${auth.userId}&compact=true`, {

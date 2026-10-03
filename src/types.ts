@@ -33,7 +33,7 @@ export interface Order {
     recruiter: boolean;
   };
   prepaid_milestone: boolean;
-  source?: "alert" | "search";
+  source?: "active" | "alert" | "search";
 }
 
 export interface Hours {

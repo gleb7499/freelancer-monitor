@@ -82,16 +82,16 @@ async function insertSeen(env: Env, records: SeenRecord[]): Promise<void> {
   }
 }
 
-// Alert-заказы Freelancer уже отфильтровал по сохранённому поиску — единственный
-// жёсткий фильтр здесь: bids > 5. Все увиденные помечаются в seen
-// (source `alert`); bids>5 идут со status rejected reason `rej:bids>5`.
+// Заказы с источника (официальный API) — единственный жёсткий фильтр:
+// bids > 5. Все увиденные помечаются в seen (source из параметра);
+// bids>5 идут со status rejected reason `rej:bids>5`.
 // Возвращает заказы, прошедшие гейт.
-export async function markAlertSeen(env: Env, orders: Order[]): Promise<Order[]> {
+export async function markAlertSeen(env: Env, orders: Order[], source = "active"): Promise<Order[]> {
   if (orders.length === 0) return [];
   const kept = orders.filter((o) => o.bids <= MAX_BIDS_GATE);
   const records = orders.map((o) => ({
     id: o.id,
-    source: "alert",
+    source,
     status: o.bids > MAX_BIDS_GATE ? "rejected" : "passed",
     reason: o.bids > MAX_BIDS_GATE ? "rej:bids>5" : null,
     ts: Date.now(),
@@ -101,12 +101,12 @@ export async function markAlertSeen(env: Env, orders: Order[]): Promise<Order[]>
 }
 
 // Пометить заказы отклонёнными по внешнему условию (например, bids-баланс = 0).
-// Alerts без возврата: без пометки заказы зависли бы и перескорились никогда.
+// Без пометки заказы зависли бы и перескорились никогда.
 export async function markRejected(env: Env, orders: Order[], reason: string): Promise<void> {
   if (orders.length === 0) return;
   const records = orders.map((o) => ({
     id: o.id,
-    source: o.source ?? "alert",
+    source: o.source ?? "active",
     status: "rejected",
     reason,
     ts: Date.now(),

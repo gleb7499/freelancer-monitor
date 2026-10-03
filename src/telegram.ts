@@ -68,7 +68,7 @@ export function formatOrderCard(
 
   const parts: string[] = [];
   const typeLabel = order.type === "hourly" ? "hourly" : "fixed";
-  parts.push(`📡 alert — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
+  parts.push(`📡 ${order.source ?? "active"} — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
   parts.push(`💰 Бюджет: ${budgetLine(order)}`);
   const avgPart = order.bid_avg != null ? ` (ср. $${order.bid_avg})` : "";
   parts.push(`👥 Откликов: ${order.bids}${avgPart}`);

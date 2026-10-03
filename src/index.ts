@@ -1,8 +1,8 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
-import { fetchProjectsByIds, fetchOwnerInfo } from "./enrich";
+import { fetchOwnerInfo } from "./enrich";
 import { filterNew, markAlertSeen, markRejected, seenStats24h } from "./service";
-import { fetchAlertLeads } from "./sources/freelancer-alerts";
+import { fetchActiveOrders } from "./sources/freelancer-active";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
   scoreOrder,
@@ -26,8 +26,6 @@ interface TickStats {
   errors: string[];
 }
 
-const AUTH_ALERT_KEY = "alerts:auth_alerted";
-const AUTH_ALERT_TTL_SEC = 3600;
 const BIDS_UNSET_ALERT_KEY = "bids:unset-alerted";
 
 async function sendAuthAlertOnce(env: Env, key: string, ttlSec: number, message: string): Promise<void> {
@@ -69,44 +67,26 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
 
   const ordersToScore: Order[] = [];
 
-  // --- Единственный канал: saved search alerts ---
+  // --- Единственный канал: официальный публичный API projects/active ---
   try {
-    const alerts = await fetchAlertLeads(env);
-    if (alerts.authFailed) {
-      log("alerts.authFailed", {});
-      await sendAuthAlertOnce(
-        env,
-        AUTH_ALERT_KEY,
-        AUTH_ALERT_TTL_SEC,
-        "Протухла сессия Freelancer (alerts), обнови куки через /admin/fl-auth",
-      );
-    } else if (alerts.error !== null) {
-      stats.errors.push(alerts.error);
-      await logError(env, "alerts.error", { message: alerts.error });
-    } else if (alerts.leads.length > 0) {
-      stats.alertsFetched = alerts.leads.length;
-      log("alerts.fetched", { count: alerts.leads.length });
-      try {
-        const alertOrders = await fetchProjectsByIds(
-          env,
-          alerts.leads.map((l) => l.projectId),
-        );
-        const alertSeen = await filterNew(env, alertOrders);
-        // Единственный статический гейт: bids > 5 (source alert внутри).
-        const freshAlerts = await markAlertSeen(env, alertSeen);
-        stats.alertsFresh = freshAlerts.length;
-        log("alerts.fresh", { fresh: freshAlerts.length });
-        ordersToScore.push(...freshAlerts);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        stats.errors.push(message);
-        await logError(env, "alerts.error", { message });
-      }
+    const active = await fetchActiveOrders(env);
+    if (active.error !== null) {
+      stats.errors.push(active.error);
+      await logError(env, "active.error", { message: active.error });
+    } else if (!active.skipped && active.orders.length > 0) {
+      stats.alertsFetched = active.orders.length;
+      log("active.fetched", { count: active.orders.length });
+      const fresh = await filterNew(env, active.orders);
+      // Единственный статический гейт: bids > 5.
+      const kept = await markAlertSeen(env, fresh, "active");
+      stats.alertsFresh = kept.length;
+      log("active.fresh", { fresh: kept.length });
+      ordersToScore.push(...kept);
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     stats.errors.push(message);
-    await logError(env, "alerts.error", { message });
+    await logError(env, "active.error", { message });
   }
 
   if (ordersToScore.length === 0) {
@@ -343,14 +323,13 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ error: "invalid JSON body" }, 400);
     }
   } else {
-    // Fallback: берём первый свежий алерт, если он есть.
-    const alerts = await fetchAlertLeads(env);
-    if (alerts.leads.length > 0) {
-      const orders = await fetchProjectsByIds(env, [alerts.leads[0].projectId]);
-      order = orders[0] ?? null;
+    // Fallback: берём самый свежий заказ из официального active-канала.
+    const active = await fetchActiveOrders(env);
+    if (active.orders.length > 0) {
+      order = active.orders[0];
     }
     if (!order) {
-      return jsonResponse({ error: "no live orders (alerts empty)" }, 404);
+      return jsonResponse({ error: "no live orders (active feed empty)" }, 404);
     }
   }
 

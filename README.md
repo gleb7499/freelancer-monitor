@@ -4,7 +4,7 @@ Cloudflare Worker (TypeScript) that watches Freelancer.com saved-search alerts, 
 
 ## How it works
 
-Pipeline ticking every 10 s (Durable Object alarms; minute cron is a watchdog):
+Pipeline ticking every 10 s (Durable Object alarms; minute cron is a watchdog). Intake: official public `projects/active` polling every 25 s (11 skills, fixed+hourly, en, newest first, submitdate cursor):
 
 ```
 [1] Alerts          saved-search alerts → project ids → fetchProjectsByIds

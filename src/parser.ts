@@ -2,7 +2,7 @@ import type { Order } from "./types";
 
 const MAX_DESCRIPTION_LENGTH = 4000;
 
-interface FreelancerProject {
+export interface FreelancerProject {
   id: number;
   title?: string;
   type?: string;
