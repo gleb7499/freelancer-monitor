@@ -14,7 +14,7 @@ Minute-cron pipeline:
 [3] Enrich          fetchOwnerInfo → order.owner (goes into scoring JSON)
       ↓
 [4] Bids gate       D1 bid_ledger balance; 0 → reject rej:no-bids,
-                    null → daily "set /setbids N" alert
+                    null → daily alert that balance is unreadable
       ↓
 [5] LLM scoring     scoreOrder → verdict BID / PASS (value_score + ai_hours,
                     Kimi, JSON-schema, retries, validation)
@@ -28,7 +28,6 @@ Minute-cron pipeline:
 ```
 /mode test|live|off  — switch bid mode
 /status              — mode, bids balance, seen stats for 24h
-/setbids N           — record actual bids balance into the D1 ledger
 ```
 
 ## Project structure
@@ -41,7 +40,7 @@ src/
   parser.ts       — normalizeProject (Freelancer project → Order)
   enrich.ts       — fetchProjectsByIds, fetchOwnerInfo
   service.ts      — D1 dedup, alert gate, seen stats
-  bids-balance.ts — D1 bid ledger (balance/regen/setBalance/recordBidSpent)
+  bids-balance.ts — bids balance via getBidLimit.php (read-only), D1 ledger fallback (regen/recordBidSpent)
   bidder.ts       — placeBid via official Freelancer API (OAuth)
   mode.ts         — getMode/setMode (KV, default test)
   kimi.ts         — scoring via Kimi API (JSON-schema, retries, validation)

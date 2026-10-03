@@ -78,7 +78,7 @@ async function lastRow(env: Env): Promise<LedgerRow | null> {
 }
 
 // Восстановить баланс из последней известной точки леджера.
-// Леджер пуст (setBalance ни разу не вызывали) → null.
+// Леджер пуст → null.
 async function reconcile(env: Env): Promise<number | null> {
   const last = await lastRow(env);
   if (!last) return null;
@@ -106,16 +106,6 @@ export async function getBidsBalance(env: Env): Promise<BidsBalance> {
     nextBidInMinutes: Math.max(1, Math.round(msToNext / 60000)),
     source: "ledger",
   };
-}
-
-// Команда оператора /setbids N — зафиксировать фактический баланс.
-export async function setBalance(env: Env, n: number): Promise<void> {
-  const clamped = Math.max(0, Math.min(MAX_BIDS, Math.floor(n)));
-  await env.DB.prepare(
-    "INSERT INTO bid_ledger (ts, delta, note) VALUES (?, ?, ?)"
-  )
-    .bind(Date.now(), clamped, `setbids:${clamped}`)
-    .run();
 }
 
 // Списать 1 ставку после успешного размещения.

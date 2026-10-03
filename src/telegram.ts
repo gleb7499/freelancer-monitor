@@ -218,7 +218,6 @@ async function setMyCommands(env: Env): Promise<unknown> {
       commands: [
         { command: "mode", description: "Режим: /mode test | live | off" },
         { command: "status", description: "Режим, баланс bids, статистика за сутки" },
-        { command: "setbids", description: "Установить баланс bids: /setbids 25" },
       ],
     }),
     signal: AbortSignal.timeout(15000),

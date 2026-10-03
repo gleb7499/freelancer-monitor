@@ -52,7 +52,6 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 
 - `/mode test|live|off` — переключить режим, ответ «режим: X»
 - `/status` — режим, баланс bids (леджер), статистика seen за 24ч из D1
-- `/setbids N` — зафиксировать фактический баланс bids в леджере
 
 Webhook регистрируется один раз: `POST /test/set-webhook` (header X-Admin-Token) — вызывает Telegram setWebhook на `https://<origin>/tg-webhook/<ADMIN_TOKEN>`.
 

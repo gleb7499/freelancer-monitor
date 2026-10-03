@@ -14,7 +14,7 @@ import { formatOrderCard, sendTelegram, alert, setWebhook } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
-import { getBidsBalance, setBalance } from "./bids-balance";
+import { getBidsBalance } from "./bids-balance";
 
 interface TickStats {
   mode: Mode;
@@ -126,7 +126,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     }
   }
 
-  // Гейт bids-баланса (D1-леджер).
+  // Гейт bids-баланса (getBidLimit API, fallback — D1-леджер).
   let bidsBalance: number | null = null;
   try {
     const b = await getBidsBalance(env);
@@ -144,13 +144,13 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   }
 
   if (bidsBalance === null) {
-    // Леджер не инициализирован — работаем без поднятия планки, но просим
-    // оператора задать баланс (не чаще раза в сутки).
+    // Баланс не прочитался (API getBidLimit недоступен и леджер пуст) —
+    // работаем без поднятия планки, но алертим (не чаще раза в сутки).
     await sendAuthAlertOnce(
       env,
       BIDS_UNSET_ALERT_KEY,
       86400,
-      "Баланс bids неизвестен — укажи баланс: /setbids N",
+      "Баланс bids не читается (getBidLimit недоступен)",
     );
   }
 
@@ -369,7 +369,7 @@ async function handleTgCommand(env: Env, text: string): Promise<void> {
     const lines = stats.map((s) => `  ${s.status}/${s.source}: ${s.count}`);
     const balanceLine =
       balance.balance === null
-        ? "баланс bids: неизвестен (задай: /setbids N)"
+        ? "баланс bids: неизвестен (API недоступен)"
         : `баланс bids: ${balance.balance} [${balance.source}]` +
           (balance.nextBidInMinutes !== null ? ` (след. +1 через ${balance.nextBidInMinutes} мин)` : "");
     log("tg.status", { mode, balance: balance.balance, source: balance.source });
@@ -379,21 +379,11 @@ async function handleTgCommand(env: Env, text: string): Promise<void> {
     );
     return;
   }
-
-  if (trimmed.startsWith("/setbids")) {
-    const arg = Number(trimmed.slice("/setbids".length).trim());
-    if (!Number.isFinite(arg) || arg < 0) {
-      await sendTelegram(env, "setbids: нужно неотрицательное число, напр. /setbids 80");
-      return;
-    }
-    await setBalance(env, arg);
-    const balance = await getBidsBalance(env);
-    await sendTelegram(env, `баланс зафиксирован: ${balance.balance}`);
-    return;
-  }
 }
 
-async function handleTgWebhook(request: Request, env: Env): Promise<Response> {
+// Telegram ретраит апдейт, если не получил 200 быстро — отвечаем сразу,
+// команда обрабатывается в фоне (иначе дубли сообщений).
+async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Not Found", { status: 404 });
   }
@@ -407,8 +397,11 @@ async function handleTgWebhook(request: Request, env: Env): Promise<Response> {
   const chatId = message?.chat?.id;
   if (typeof message?.text === "string" && chatId !== undefined) {
     if (String(chatId) === env.TELEGRAM_CHAT_ID) {
-      log("tg.command", { text: message.text });
-      await handleTgCommand(env, message.text);
+      const text = message.text;
+      log("tg.command", { text });
+      ctx.waitUntil(
+        handleTgCommand(env, text).catch((e) => console.error("tg.command failed:", e)),
+      );
     } else {
       console.warn("tg.webhook: ignored foreign chat", chatId);
     }
@@ -453,7 +446,7 @@ export default {
 
     // Webhook-путь авторизован токеном в URL, не заголовком.
     if (url.pathname === `/tg-webhook/${env.ADMIN_TOKEN}`) {
-      return await handleTgWebhook(request, env);
+      return await handleTgWebhook(request, env, ctx);
     }
 
     if (!isAuthorized(request, env)) {
