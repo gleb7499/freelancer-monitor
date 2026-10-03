@@ -477,6 +477,9 @@ export default {
       if (request.method === "GET" && url.pathname === "/test/logs") {
         return jsonResponse(await readRing(env));
       }
+      if (request.method === "GET" && url.pathname === "/test/bids-balance") {
+        return jsonResponse(await getBidsBalance(env));
+      }
       if (url.pathname === "/admin/fl-auth") {
         return await handleFlAuth(request, env);
       }
