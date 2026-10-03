@@ -241,6 +241,45 @@ export async function answerCallbackQuery(
   });
 }
 
+// Заменить текст сообщения (и убрать клавиатуру, если не передана).
+export async function editMessage(
+  env: Env,
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
+): Promise<void> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`;
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+  };
+  if (replyMarkup !== undefined) body.reply_markup = replyMarkup;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+}
+
+// Удалить сообщение (свою команду-эхо или служебное сообщение бота).
+export async function deleteMessage(
+  env: Env,
+  chatId: number | string,
+  messageId: number,
+): Promise<void> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    signal: AbortSignal.timeout(15000),
+  });
+}
+
 export async function alert(env: Env, text: string): Promise<void> {
   const key = "tg:alert";
   const existing = await env.ORDERS_KV.get(key);

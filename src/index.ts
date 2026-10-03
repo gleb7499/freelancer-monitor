@@ -10,7 +10,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, sendTelegram, alert, setWebhook, answerCallbackQuery } from "./telegram";
+import { formatOrderCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
@@ -397,11 +397,12 @@ interface TelegramUpdate {
   message?: {
     chat?: { id?: number | string };
     text?: string;
+    message_id?: number;
   };
   callback_query?: {
     id: string;
     data?: string;
-    message?: { chat?: { id?: number | string } };
+    message?: { chat?: { id?: number | string }; message_id?: number };
   };
 }
 
@@ -416,7 +417,12 @@ const MODE_KEYBOARD = {
 };
 
 // Команды оператора из Telegram. Принимаем только от TELEGRAM_CHAT_ID.
-async function handleTgCommand(env: Env, text: string): Promise<void> {
+async function handleTgCommand(
+  env: Env,
+  text: string,
+  execCtx: ExecutionContext,
+  msg?: { chatId: number | string; messageId?: number },
+): Promise<void> {
   const trimmed = text.trim();
 
   if (trimmed.startsWith("/mode")) {
@@ -425,8 +431,13 @@ async function handleTgCommand(env: Env, text: string): Promise<void> {
       await setMode(env, arg);
       await sendTelegram(env, `режим: ${arg}`);
     } else {
-      // Без аргумента — интерактивный выбор кнопками.
+      // Без аргумента — интерактивный выбор кнопками; эхо команды удаляем.
       await sendTelegram(env, "Выбери режим:", MODE_KEYBOARD);
+      if (msg?.messageId !== undefined) {
+        execCtx.waitUntil(
+          deleteMessage(env, msg.chatId, msg.messageId).catch(() => undefined),
+        );
+      }
     }
     return;
   }
@@ -469,7 +480,9 @@ async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext
       const text = message.text;
       log("tg.command", { text });
       ctx.waitUntil(
-        handleTgCommand(env, text).catch((e) => console.error("tg.command failed:", e)),
+        handleTgCommand(env, text, ctx, { chatId, messageId: message.message_id }).catch(
+          (e) => console.error("tg.command failed:", e),
+        ),
       );
     } else {
       console.warn("tg.webhook: ignored foreign chat", chatId);
@@ -486,8 +499,15 @@ async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext
         (async () => {
           if (selected === "test" || selected === "live" || selected === "off") {
             await setMode(env, selected);
-            await answerCallbackQuery(env, callback.id, `режим: ${selected} ✅`);
-            await sendTelegram(env, `режим: ${selected}`);
+            await answerCallbackQuery(env, callback.id);
+            // Вместо нового сообщения — заменяем само «Выбери режим:» и
+            // убираем клавиатуру. Сообщение больше не засоряет чат.
+            const cbMessageId = callback.message?.message_id;
+            if (cbChatId !== undefined && typeof cbMessageId === "number") {
+              await editMessage(env, cbChatId, cbMessageId, `режим: ${selected} ✅`);
+            } else {
+              await sendTelegram(env, `режим: ${selected}`);
+            }
           } else {
             await answerCallbackQuery(env, callback.id, "неизвестный режим");
           }
