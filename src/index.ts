@@ -1,7 +1,7 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
 import { fetchOwnerInfo } from "./enrich";
-import { filterNew, markAlertSeen, markRejected, seenStats24h } from "./service";
+import { filterNew, markAlertSeen, seenStats24h } from "./service";
 import { fetchActiveOrders } from "./sources/freelancer-active";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
@@ -65,6 +65,39 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   const startedAt = Date.now();
   log("tick.start", { trigger, mode });
 
+  // Гейт bids-баланса — ДО опроса заказов: при balance = 0 система в idle
+  // (нет ни опроса API, ни LLM) до восстановления хотя бы одного bid.
+  // Заказы за время простоя не теряются окончательно: курсор не двигается,
+  // при возобновлении докрутимся по свежему окну выдачи.
+  let bidsBalance: number | null = null;
+  try {
+    const b = await getBidsBalance(env);
+    bidsBalance = b.balance;
+  } catch (e) {
+    console.warn("getBidsBalance failed:", String(e));
+  }
+
+  if (bidsBalance === 0) {
+    log("tick.idle-no-bids", {});
+    if (mode === "test") {
+      await alert(env, "bids = 0 — idle: опрос и LLM остановлены до восстановления bid");
+    }
+    await finishTick(env, stats, startedAt);
+    await flushLogBuffer(env);
+    return stats;
+  }
+
+  if (bidsBalance === null) {
+    // Баланс не прочитался (API getBidLimit недоступен и леджер пуст) —
+    // работаем без поднятия планки, но алертим (не чаще раза в сутки).
+    await sendAuthAlertOnce(
+      env,
+      BIDS_UNSET_ALERT_KEY,
+      86400,
+      "Баланс bids не читается (getBidLimit недоступен)",
+    );
+  }
+
   const ordersToScore: Order[] = [];
 
   // --- Единственный канал: официальный публичный API projects/active ---
@@ -112,39 +145,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       order.owner = null;
       console.warn("fetchOwnerInfo failed:", { id: order.id, err: String(e) });
     }
-  }
-
-  // Гейт bids-баланса (getBidLimit API, fallback — D1-леджер).
-  let bidsBalance: number | null = null;
-  try {
-    const b = await getBidsBalance(env);
-    bidsBalance = b.balance;
-  } catch (e) {
-    console.warn("getBidsBalance failed:", String(e));
-  }
-
-  if (bidsBalance === 0) {
-    log("tick.idle-no-bids", { pending: ordersToScore.length });
-    await markRejected(env, ordersToScore, "rej:no-bids");
-    if (mode === "test") {
-      for (const order of ordersToScore) {
-        await sendTelegram(env, `[TEST] нет bids на балансе\n\n${formatRejectCard(order, "bids = 0 — заказ пропущен до восстановления")}`);
-      }
-    }
-    await finishTick(env, stats, startedAt);
-    await flushLogBuffer(env);
-    return stats;
-  }
-
-  if (bidsBalance === null) {
-    // Баланс не прочитался (API getBidLimit недоступен и леджер пуст) —
-    // работаем без поднятия планки, но алертим (не чаще раза в сутки).
-    await sendAuthAlertOnce(
-      env,
-      BIDS_UNSET_ALERT_KEY,
-      86400,
-      "Баланс bids не читается (getBidLimit недоступен)",
-    );
   }
 
   // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
