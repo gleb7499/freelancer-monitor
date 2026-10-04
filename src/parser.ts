@@ -7,7 +7,6 @@ export interface FreelancerProject {
   title?: string;
   type?: string;
   seo_url?: string;
-  owner_id?: number;
   description?: string;
   preview_description?: string;
   submitdate?: number;
@@ -75,12 +74,10 @@ export function normalizeProject(project: FreelancerProject, nicheId: string): O
       typeof project.bid_stats?.bid_avg === "number"
         ? usdAmount(project.bid_stats.bid_avg, exchangeRate)
         : null,
-    owner_id: typeof project.owner_id === "number" ? project.owner_id : null,
     description,
     language: project.language ?? "en",
     submit_ts: project.submitdate ?? 0,
     deadline_hint: typeof project.bidperiod === "number" ? `bidperiod ${project.bidperiod}d` : null,
-    competition: null,
     hidebids: project.hidebids === true,
     is_escrow_project: project.is_escrow_project === true,
     time_free_bids_expire:
@@ -97,6 +94,6 @@ export function normalizeProject(project: FreelancerProject, nicheId: string): O
       recruiter: bool("recruiter"),
     },
     prepaid_milestone: !!project.active_prepaid_milestone,
-    source: "alert",
+    source: "active",
   };
 }

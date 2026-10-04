@@ -13,13 +13,11 @@ export interface Order {
   currency_sign: string;
   bids: number;
   bid_avg: number | null;
-  owner_id: number | null;
   client?: ProjectClientInfo | null;
   description: string;
   language: string;
   submit_ts: number;
   deadline_hint: string | null;
-  competition: "normal" | "high" | null;
   hidebids: boolean;
   is_escrow_project: boolean;
   time_free_bids_expire: number | null;
@@ -33,7 +31,7 @@ export interface Order {
     recruiter: boolean;
   };
   prepaid_milestone: boolean;
-  source?: "active" | "alert" | "search";
+  source?: "active";
 }
 
 export interface Hours {

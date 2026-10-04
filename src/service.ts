@@ -100,20 +100,6 @@ export async function markAlertSeen(env: Env, orders: Order[], source = "active"
   return kept;
 }
 
-// Пометить заказы отклонёнными по внешнему условию (например, bids-баланс = 0).
-// Без пометки заказы зависли бы и перескорились никогда.
-export async function markRejected(env: Env, orders: Order[], reason: string): Promise<void> {
-  if (orders.length === 0) return;
-  const records = orders.map((o) => ({
-    id: o.id,
-    source: o.source ?? "active",
-    status: "rejected",
-    reason,
-    ts: Date.now(),
-  }));
-  await insertSeen(env, records);
-}
-
 // Статистика seen за последние 24 часа — для команды /status.
 export async function seenStats24h(
   env: Env,

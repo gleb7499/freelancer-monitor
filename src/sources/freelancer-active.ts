@@ -93,9 +93,7 @@ export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
     const project = raw as FreelancerProject;
     const submit = typeof project.submitdate === "number" ? project.submitdate : 0;
     if (submit <= lastSubmit) continue;
-    const order = normalizeProject(project, "active");
-    order.source = "active";
-    orders.push(order);
+    orders.push(normalizeProject(project, "active"));
     if (submit > maxSubmit) maxSubmit = submit;
   }
 
