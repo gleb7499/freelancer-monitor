@@ -458,12 +458,25 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
 
 export function buildBidMessages(
   order: Order,
-  score: ScoreResult
+  score: ScoreResult,
+  portfolio?: import("./enrich").PortfolioInfo | null
 ): { role: string; content: string }[] {
   const weeklyNote =
     order.type === "hourly" && score.weekly_limit_hours !== null
       ? `\nWeekly availability limit for this bid: ${score.weekly_limit_hours} hours/week — if the text mentions hours per week or availability, do not exceed it.`
       : "";
+  let portfolioBlock = "";
+  if (portfolio && portfolio.items.length > 0) {
+    const lines = portfolio.items
+      .map((it) => `- ${it.title}: ${it.description}`)
+      .join("\n");
+    portfolioBlock =
+      `\n\nPortfolio published on the platform profile — when the client asks for examples/links` +
+      ` or a piece is directly relevant, reference 1-2 items BY TITLE (and the profile link or demo` +
+      ` links from the descriptions); this is always stronger than emphasizing the new account.` +
+      ` Never invent portfolio links.\n${lines}` +
+      (portfolio.profileUrl ? `\nProfile: ${portfolio.profileUrl}` : "");
+  }
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
     {
@@ -474,6 +487,7 @@ export function buildBidMessages(
         "\n\nValidated score:\n" +
         JSON.stringify(score) +
         weeklyNote +
+        portfolioBlock +
         "\n\nWrite the bid text now.",
     },
   ];

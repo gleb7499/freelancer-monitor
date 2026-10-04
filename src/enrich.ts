@@ -11,6 +11,109 @@ const FETCH_TIMEOUT_MS = 15000;
 // - projects/0.1/projects/ — выдача проектов по id (fetchProjectsByIds);
 // - projects/0.1/projects/seo — данные заказчика по seo_url: verification,
 //   рейтинг работодателя, other_employer_jobs (проверено live 2026-10-04).
+// Закрытые точки (Authorization: Bearer <FL_API_KEY>):
+// - users/0.1/portfolios/?users[]=<id> — портфолио профиля (fetchPortfolio).
+
+export interface PortfolioItem {
+  id: number;
+  title: string;
+  description: string;
+}
+
+export interface PortfolioInfo {
+  username: string | null;
+  profileUrl: string | null;
+  items: PortfolioItem[];
+}
+
+const PORTFOLIO_CACHE_KEY = "portfolio:cache";
+const PORTFOLIO_CACHE_TTL = 6 * 3600;
+const DESCRIPTION_MAX = 700;
+
+// Портфолио профиля: title + обрезанное description (демо-ссылки живут внутри
+// description и достаются LLM оттуда). Кэш KV на 6 ч — состав меняется редко.
+// Любая ошибка → null (отклик пишется без портфолио-контекста).
+export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
+  try {
+    const cached = await env.ORDERS_KV.get(PORTFOLIO_CACHE_KEY);
+    if (cached !== null) {
+      return JSON.parse(cached) as PortfolioInfo;
+    }
+  } catch {
+    // кэш недоступен — идём в API
+  }
+
+  const cfg = getConfig(env);
+  const authHeaders: Record<string, string> = cfg.flApiKey
+    ? { Authorization: `Bearer ${cfg.flApiKey}` }
+    : {};
+  let items: PortfolioItem[] = [];
+  try {
+    const url = new URL("https://www.freelancer.com/api/users/0.1/portfolios/");
+    url.searchParams.set("users[]", cfg.flUserId);
+    const res = await fetch(url.toString(), {
+      headers: { "User-Agent": USER_AGENT, ...authHeaders },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        status?: string;
+        result?: { portfolios?: Record<string, unknown> };
+      };
+      const raw = data.result?.portfolios?.[cfg.flUserId];
+      const arr = Array.isArray(raw) ? raw : [];
+      items = arr
+        .filter((it) => it && typeof it === "object")
+        .map((it: any) => {
+          const title = typeof it.title === "string" ? it.title : "";
+          let description = typeof it.description === "string" ? it.description : "";
+          if (description.length > DESCRIPTION_MAX) {
+            description = description.slice(0, DESCRIPTION_MAX);
+            const lastSpace = description.lastIndexOf(" ");
+            if (lastSpace > DESCRIPTION_MAX / 2) description = description.slice(0, lastSpace);
+            description += "…";
+          }
+          return { id: Number(it.id) || 0, title, description };
+        })
+        .filter((it) => it.id > 0 && it.title !== "");
+    }
+  } catch {
+    return null;
+  }
+  if (items.length === 0) return null;
+
+  // Username для ссылки на профиль (анонимная точка users/{id}).
+  let username: string | null = null;
+  try {
+    const res = await fetch(
+      `https://www.freelancer.com/api/users/0.1/users/${cfg.flUserId}?compact=true`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; result?: { username?: unknown } };
+      if (data.status === "success" && typeof data.result?.username === "string") {
+        username = data.result.username;
+      }
+    }
+  } catch {
+    // username не критичен
+  }
+
+  const info: PortfolioInfo = {
+    username,
+    profileUrl: username ? `https://www.freelancer.com/u/${username}` : null,
+    items,
+  };
+  try {
+    await env.ORDERS_KV.put(PORTFOLIO_CACHE_KEY, JSON.stringify(info), {
+      expirationTtl: PORTFOLIO_CACHE_TTL,
+    });
+  } catch {
+    // кэш не записался — не страшно
+  }
+  return info;
+}
+
 
 // Своя копия fetchProjectsByIds: источник истины здесь, parser.ts держит
 // только normalizeProject.

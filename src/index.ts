@@ -1,6 +1,6 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
-import { fetchProjectClient } from "./enrich";
+import { fetchProjectClient, fetchPortfolio } from "./enrich";
 import { filterNew, markAlertSeen, seenStats24h } from "./service";
 import { fetchActiveOrders } from "./sources/freelancer-active";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
@@ -247,7 +247,11 @@ async function processOrder(
 
     let bidText: string | null = null;
     try {
-      bidText = await generateBidText(env, buildBidMessages(order, score));
+      const portfolio = await fetchPortfolio(env).catch((e) => {
+        console.warn("fetchPortfolio failed:", String(e));
+        return null;
+      });
+      bidText = await generateBidText(env, buildBidMessages(order, score, portfolio));
     } catch (e) {
       console.error("generateBidText failed:", e);
     }
@@ -388,7 +392,8 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
     let bidText: string | null = null;
     if (score.verdict === "BID") {
       try {
-        bidText = await generateBidText(env, buildBidMessages(order, score));
+        const portfolio = await fetchPortfolio(env).catch(() => null);
+        bidText = await generateBidText(env, buildBidMessages(order, score, portfolio));
       } catch (e) {
         bidText = null;
         console.error("generateBidText failed:", e);
