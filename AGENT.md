@@ -79,7 +79,7 @@ Webhook регистрируется один раз: `POST /test/set-webhook` (
 - **No budget floors.** Budget/rate thresholds were deliberately removed: static filters and post-scoring validation never reject by price (no `MIN_BUDGET_USD`/`MIN_FIXED_USD`/`MIN_HOURLY_USD`). Cheap orders (incl. low INR budgets) reach the LLM, which decides price fitness in the verdict.
 - **Value-score:** scoring выдаёт `value_score` (0–100) и `ai_hours`; карточка показывает `🎯 Value: N/100 (~$X/ч при Y AI-ч)`. Порог BID по value_score — `BID_MIN_SCORE` из `wrangler.toml`.
 
-Note: platform-specific selection rules live in `rules/freelancer-*.md`. More platforms (Upwork etc.) are planned — each platform will have slightly different selection rules, so keep platform-specific logic separated from the common pipeline (parser per platform, shared dedup/scoring/card layers).
+Note: platform-specific selection rules live in `rules/freelancer-*.md`. The pipeline is platform-shaped (parser per platform, shared dedup/scoring/card layers) — при появлении второй площадки её правила добавляются как отдельный файл rules/, без переломки общего конвейера.
 
 ## Testing
 
