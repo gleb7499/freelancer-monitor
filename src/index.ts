@@ -255,13 +255,17 @@ async function processOrder(
     const bidResult = await placeBid(env, order, score, bidText);
 
     const card = formatOrderCard(order, score, bidText, removedUpgrades);
+    const sign = order.currency_sign ?? "$";
     let header: string;
     if (mode === "test") {
       header = `[TEST] ставка НЕ отправлена`;
     } else if (bidResult.placed) {
       const upgradesPart =
         score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
-      header = `✅ Отклик отправлен: $${score.bid_amount}, апгрейды: ${upgradesPart}`;
+      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, апгрейды: ${upgradesPart}`;
+    } else if (bidResult.reason === "insufficient-balance") {
+      header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
+      await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
     } else {
       header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
     }

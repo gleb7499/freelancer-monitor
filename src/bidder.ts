@@ -124,6 +124,17 @@ export async function placeBid(
     console.error("bidder.oauth-invalid", { id: order.id });
     return { placed: false, reason: "oauth-invalid" };
   }
+  // Часть заказов требует минимальный баланс на счету (~$20) для ставки.
+  const lower = text.toLowerCase();
+  if (
+    lower.includes("balance") ||
+    lower.includes("deposit") ||
+    lower.includes("funds") ||
+    lower.includes("insufficient")
+  ) {
+    console.error("bidder.insufficient-balance", { id: order.id, status: res.status, text });
+    return { placed: false, reason: "insufficient-balance" };
+  }
   console.error("bidder.failed", { id: order.id, status: res.status, text });
   return { placed: false, reason: `http-${res.status}` };
 }
