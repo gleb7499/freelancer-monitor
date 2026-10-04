@@ -18,11 +18,13 @@ export interface PortfolioItem {
   id: number;
   title: string;
   description: string;
+  // Прямая ссылка на элемент портфолио — в откликах ссылаемся ВСЕГДА на неё,
+  // а не на профиль целиком (маршрут веб-приложения, проверено 04.10.2026).
+  url: string | null;
 }
 
 export interface PortfolioInfo {
   username: string | null;
-  profileUrl: string | null;
   items: PortfolioItem[];
 }
 
@@ -73,7 +75,7 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
             if (lastSpace > DESCRIPTION_MAX / 2) description = description.slice(0, lastSpace);
             description += "…";
           }
-          return { id: Number(it.id) || 0, title, description };
+          return { id: Number(it.id) || 0, title, description, url: null as string | null };
         })
         .filter((it) => it.id > 0 && it.title !== "");
     }
@@ -82,7 +84,8 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
   }
   if (items.length === 0) return null;
 
-  // Username для ссылки на профиль (анонимная точка users/{id}).
+  // Username для прямых ссылок на элементы портфолио (анонимная точка users/{id}).
+  // Маршрут элемента: /u/<username>/portfolio-item/<id> (проверено 04.10.2026).
   let username: string | null = null;
   try {
     const res = await fetch(
@@ -98,10 +101,14 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
   } catch {
     // username не критичен
   }
+  if (username) {
+    for (const it of items) {
+      it.url = `https://www.freelancer.com/u/${username}/portfolio-item/${it.id}`;
+    }
+  }
 
   const info: PortfolioInfo = {
     username,
-    profileUrl: username ? `https://www.freelancer.com/u/${username}` : null,
     items,
   };
   try {

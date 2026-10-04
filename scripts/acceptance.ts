@@ -267,7 +267,11 @@ async function testPortfolio() {
   const p1 = await fetchPortfolio(env);
   eq(p1 && p1.items.length, 2, "portfolio: 2 items parsed");
   eq(p1 && p1.username, "gleb7499", "portfolio: username parsed");
-  eq(p1 && p1.profileUrl, "https://www.freelancer.com/u/gleb7499", "portfolio: profile url built");
+  eq(
+    p1 && p1.items[0].url,
+    "https://www.freelancer.com/u/gleb7499/portfolio-item/1",
+    "portfolio: per-item link built",
+  );
   ok(p1 !== null && p1.items[1].description.length <= 705, "portfolio: long description truncated");
   ok(store.has("portfolio:cache"), "portfolio: KV cache written");
 
@@ -287,7 +291,17 @@ async function testPortfolio() {
   eq(await fetchPortfolio(env), null, "portfolio: empty -> null");
   eq(store.has("portfolio:cache"), false, "portfolio: empty not cached");
 
-  // 4) ошибка сети -> null
+  // 4) username недоступен -> items без ссылок, но контекст живой
+  globalThis.fetch = (async (url: string) =>
+    url.includes("/portfolios/")
+      ? new Response(JSON.stringify({ status: "success", result: { portfolios: { 94242579: [item(3, "Proj C", "d")] } } }), { status: 200 })
+      : new Response("nf", { status: 404 })) as any;
+  const p3 = await fetchPortfolio(env);
+  eq(p3 && p3.items.length, 1, "portfolio: items kept when username missing");
+  eq(p3 && p3.items[0].url, null, "portfolio: url null without username");
+  store.clear();
+
+  // 5) ошибка сети -> null
   globalThis.fetch = (async () => { throw new Error("down"); }) as any;
   eq(await fetchPortfolio(env), null, "portfolio: network error -> null");
 
