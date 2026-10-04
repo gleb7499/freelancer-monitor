@@ -29,7 +29,8 @@ Value-score mechanics (code contract — code will REJECT BID if recalculated sc
 - Estimate ai_hours: hours of work assuming the freelancer delivers with a swarm of AI agents (fast). NEVER mention AI agents or AI-assisted speed in any client-facing field.
 - rate = net / ai_hours is understood in USD: the code recalculates the exchange rate from the budget (budget_min_original / budget_min) and converts your native-currency amounts to USD.
 - value_score = clamp(0..100, usd_rate / $${opts.targetHourly} * 100). Report your estimate approximately; the code recomputes it exactly in USD.
-- Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. ${opts.bidMinScore}–60 → BID, but raise bid_amount within the budget range so the recalculated score reaches >= 60 if the budget allows. > 60 → BID.
+- Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. ${opts.bidMinScore}–60 → BID. > 60 → BID. In ALL cases the bid sits around the MIDDLE of the budget range — never the top.
+- Freshness reality: you see orders SECONDS after publication. bids = 0 means NOTHING — within minutes the order gets dozens of bids, most at or below mid-range. A top-of-range bid loses to those competitors by price; a mid-range bid with a strong text wins. Anchor for competitiveness right now: ~$10/h net.
 - Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, treat borderline value_score 60–75 as PASS.
 
 Scoring mechanics (code contract):
