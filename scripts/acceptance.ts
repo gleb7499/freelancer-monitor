@@ -2,7 +2,8 @@
 // Запуск: npm run acceptance
 import { normalizeScore, validateScore, sanitizeBidText } from "../src/kimi";
 import { isAwarded } from "../src/milestones";
-import { fetchProjectClient, fetchPortfolio } from "../src/enrich";
+import { fetchProjectClient, fetchPortfolio, CRYPTO_SKILL_ID } from "../src/enrich";
+import { preBidRejectReason } from "../src/service";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap } from "../src/upgrades";
 import type { Order } from "../src/types";
@@ -306,6 +307,32 @@ async function testPortfolio() {
   eq(await fetchPortfolio(env), null, "portfolio: network error -> null");
 
   globalThis.fetch = realFetch;
+}
+
+// ---------- K2. пре-гейт до LLM ----------
+{
+  const base = makeOrder({});
+  eq(preBidRejectReason(base), null, "pregate: clean order passes");
+  eq(
+    preBidRejectReason(makeOrder({ upgrades: { fulltime: false, featured: false, sealed: false, NDA: false, urgent: false, recruiter: true } })),
+    "rej:recruiter",
+    "pregate: recruiter rejected",
+  );
+  eq(
+    preBidRejectReason(makeOrder({ is_seller_kyc_required: true })),
+    "rej:kyc-required",
+    "pregate: kyc required rejected",
+  );
+  eq(
+    preBidRejectReason(makeOrder({ client: { payment_verified: null, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, CRYPTO_SKILL_ID] } })),
+    "rej:crypto-verified",
+    "pregate: crypto skill rejected",
+  );
+  eq(
+    preBidRejectReason(makeOrder({ client: { payment_verified: true, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, 1031] } })),
+    null,
+    "pregate: non-crypto skills pass",
+  );
 }
 
 // ---------- M. карточки Telegram ----------

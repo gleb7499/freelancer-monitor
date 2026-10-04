@@ -1,4 +1,5 @@
 import type { Env, Order } from "./types";
+import { CRYPTO_SKILL_ID } from "./enrich";
 
 // Видимость заказов в D1 (было KV `seen:*` — free tier KV = 1000 put/сутки).
 // Ретеншн 30 дней: daily-чистка по ts (флаг расписания живёт в KV, 1 put/сутки).
@@ -82,22 +83,48 @@ async function insertSeen(env: Env, records: SeenRecord[]): Promise<void> {
   }
 }
 
-// Заказы с источника (официальный API) — единственный жёсткий фильтр:
-// bids > 10. Все увиденные помечаются в seen (source из параметра);
-// bids>10 идут со status rejected reason `rej:bids>10`.
-// Возвращает заказы, прошедшие гейт.
-export async function markAlertSeen(env: Env, orders: Order[], source = "active"): Promise<Order[]> {
-  if (orders.length === 0) return [];
-  const kept = orders.filter((o) => o.bids <= MAX_BIDS_GATE);
+// Мягкий пре-гейт до LLM: физическая невозможность ставки, которую нельзя
+// было определить из выдачи intake (она не отдаёт скиллы и часть флагов).
+// Детектируется после enrich (fetchProjectClient): recruiter/KYC-флаги —
+// из заказа, крипто-скилл — из ответа projects/seo.
+// Возвращает reason вида `rej:...` или null (заказ можно скорить).
+export function preBidRejectReason(order: Order): string | null {
+  if (order.upgrades.recruiter) return "rej:recruiter";
+  if (order.is_seller_kyc_required) return "rej:kyc-required";
+  if (order.client?.skill_ids?.includes(CRYPTO_SKILL_ID)) return "rej:crypto-verified";
+  return null;
+}
+
+// Заказы с источника (официальный API) — жёсткие фильтры до LLM:
+// bids > 10 и мягкий пре-гейт физической возможности ставки (preBidRejectReason,
+// требует заполненного order.client — enrich идёт ДО вызова).
+// Все увиденные помечаются в seen (source из параметра), отказники — rejected.
+export async function markAlertSeen(
+  env: Env,
+  orders: Order[],
+  source = "active",
+): Promise<{ kept: Order[]; rejected: { order: Order; reason: string }[] }> {
+  if (orders.length === 0) return { kept: [], rejected: [] };
+  const reasons = new Map<number, string>();
+  for (const o of orders) {
+    const r =
+      o.bids > MAX_BIDS_GATE ? "rej:bids>10" : (preBidRejectReason(o) ?? null);
+    if (r !== null) reasons.set(o.id, r);
+  }
   const records = orders.map((o) => ({
     id: o.id,
     source,
-    status: o.bids > MAX_BIDS_GATE ? "rejected" : "passed",
-    reason: o.bids > MAX_BIDS_GATE ? "rej:bids>10" : null,
+    status: reasons.has(o.id) ? "rejected" : "passed",
+    reason: reasons.get(o.id) ?? null,
     ts: Date.now(),
   }));
   await insertSeen(env, records);
-  return kept;
+  return {
+    kept: orders.filter((o) => !reasons.has(o.id)),
+    rejected: orders
+      .filter((o) => reasons.has(o.id))
+      .map((o) => ({ order: o, reason: reasons.get(o.id)! })),
+  };
 }
 
 // Статистика seen за последние 24 часа — для команды /status.

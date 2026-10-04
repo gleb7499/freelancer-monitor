@@ -72,6 +72,9 @@ export interface ProjectClientInfo {
   registered_ts: number | null;
   country: string | null;
   open_projects: number | null;
+  // Скиллы проекта из того же ответа projects/seo (id-шники) — используются
+  // пре-гейтом до LLM (крипто-скилл = верификация аккаунта обязательна).
+  skill_ids: number[] | null;
 }
 
 export interface Env {

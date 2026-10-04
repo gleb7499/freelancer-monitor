@@ -32,6 +32,11 @@ const PORTFOLIO_CACHE_KEY = "portfolio:cache";
 const PORTFOLIO_CACHE_TTL = 6 * 3600;
 const DESCRIPTION_MAX = 700;
 
+// Скилл "Cryptocurrency": ставки по таким проектам требуют верификации
+// аккаунта (403 RESTRICTED_FROM_BIDDING_PREMIUM_VERIFIED_JOB, проверено
+// 04.10.2026). Используется пре-гейтом до LLM.
+export const CRYPTO_SKILL_ID = 2658;
+
 // Портфолио профиля: title + обрезанное description (демо-ссылки живут внутри
 // description и достаются LLM оттуда). Кэш KV на 6 ч — состав меняется редко.
 // Любая ошибка → null (отклик пишется без портфолио-контекста).
@@ -182,6 +187,7 @@ export async function fetchProjectClient(env: Env, seoSlug: string): Promise<Pro
         } | null;
       } | null;
       other_employer_jobs?: unknown;
+      skills?: unknown;
     } | null;
   };
   try {
@@ -205,6 +211,10 @@ export async function fetchProjectClient(env: Env, seoSlug: string): Promise<Pro
     typeof v === "number" && Number.isFinite(v) ? v : null;
 
   const otherJobs = data.result.other_employer_jobs;
+  const skillsRaw = Array.isArray(data.result.skills) ? data.result.skills : [];
+  const skillIds = skillsRaw
+    .map((s) => (s && typeof s === "object" ? Number((s as { id?: unknown }).id) : NaN))
+    .filter((n) => Number.isFinite(n) && n > 0);
 
   return {
     payment_verified: bool(client.verification?.payment_verified),
@@ -216,5 +226,6 @@ export async function fetchProjectClient(env: Env, seoSlug: string): Promise<Pro
     registered_ts: num(client.registration_unixtime),
     country: typeof client.address?.country === "string" ? client.address.country : null,
     open_projects: Array.isArray(otherJobs) ? otherJobs.length : null,
+    skill_ids: skillIds.length > 0 ? skillIds : null,
   };
 }

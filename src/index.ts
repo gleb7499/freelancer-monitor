@@ -127,17 +127,37 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       stats.alertsFetched = active.orders.length;
       log("active.fetched", { count: active.orders.length });
       const fresh = await filterNew(env, active.orders);
-      // Единственный статический гейт: bids > 10.
-      const kept = await markAlertSeen(env, fresh, "active");
+
+      // Enrich ДО гейта: мягкий пре-гейт (recruiter/KYC/крипто-скилл) решается
+      // по данным projects/seo — туда же уходит order.client в скоринг.
+      for (const order of fresh) {
+        try {
+          order.client = await fetchProjectClient(env, order.url);
+        } catch (e) {
+          order.client = null;
+          console.warn("fetchProjectClient failed:", { id: order.id, err: String(e) });
+        }
+      }
+
+      // Жёсткий гейт до LLM: bids > 10 + физическая возможность ставки.
+      const { kept, rejected } = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
-      log("active.fresh", { fresh: kept.length });
+      log("active.fresh", { fresh: kept.length, rejected: rejected.length });
       ordersToScore.push(...kept);
-      // Test-режим: уведомляем и об отклонённых гейтом (причина — bids>10).
+      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
       if (mode === "test") {
-        const keptIds = new Set(kept.map((o) => o.id));
-        for (const order of fresh) {
-          if (keptIds.has(order.id)) continue;
-          await sendTelegram(env, `[TEST] гейт bids>10\n\n${formatRejectCard(order, `уже ${order.bids} откликов (лимит ≤10 до LLM)`)}`);
+        for (const { order, reason } of rejected) {
+          const human =
+            reason === "rej:bids>10"
+              ? `уже ${order.bids} откликов (лимит ≤10 до LLM)`
+              : reason === "rej:recruiter"
+                ? "recruiter-проект — только для Preferred Freelancer"
+                : reason === "rej:kyc-required"
+                  ? "заказ требует KYC-верификации аккаунта"
+                  : reason === "rej:crypto-verified"
+                    ? "крипто-проект — нужна верификация Freelancer"
+                    : reason;
+          await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
         }
       }
     }
@@ -151,17 +171,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     await finishTick(env, stats, startedAt);
     await flushLogBuffer(env);
     return stats;
-  }
-
-  // Enrich: данные заказчика (verification, рейтинг работодателя, открытые
-  // заказы) с открытой точки projects/seo уходят в JSON скорингу.
-  for (const order of ordersToScore) {
-    try {
-      order.client = await fetchProjectClient(env, order.url);
-    } catch (e) {
-      order.client = null;
-      console.warn("fetchProjectClient failed:", { id: order.id, err: String(e) });
-    }
   }
 
   // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
