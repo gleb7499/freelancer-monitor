@@ -78,6 +78,44 @@ function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
+// Курс родной валюты заказа за 1 USD — восстанавливается из бюджета.
+function orderRate(order: Order): number {
+  return order.budget_min > 0 && order.budget_min_original > 0
+    ? order.budget_min_original / order.budget_min
+    : 1;
+}
+
+// Шаг круглой сетки ставки по величине суммы.
+function gridStep(amount: number): number {
+  if (amount < 100) return 5;
+  if (amount < 2000) return 10;
+  if (amount < 5000) return 25;
+  if (amount < 10000) return 50;
+  return 100;
+}
+
+// Округление к ближайшей точке сетки; ровно половина — вверх.
+function roundBid(amount: number): number {
+  const step = gridStep(amount);
+  const base = Math.floor(amount / step) * step;
+  return amount - base >= step / 2 ? base + step : base;
+}
+
+function roundBidUp(amount: number): number {
+  const step = gridStep(amount);
+  return Math.ceil(amount / step - 1e-9) * step;
+}
+
+function roundBidDown(amount: number): number {
+  const step = gridStep(amount);
+  return Math.floor(amount / step + 1e-9) * step;
+}
+
+// USD-эквивалент суммы в родной валюте заказа.
+function toUsd(amount: number, rate: number): number {
+  return amount / rate;
+}
+
 export function validateScore(s: any, order: Order): string[] {
   const errors: string[] = [];
   if (s === null || typeof s !== "object" || Array.isArray(s)) {
@@ -126,20 +164,28 @@ export function validateScore(s: any, order: Order): string[] {
     (s.verdict === "BID" && s.bid_amount <= 0)
   ) {
     errors.push("bid_amount must be a non-negative number (positive for BID)");
-  } else if (
-    s.verdict === "BID" &&
-    typeof order.budget_min === "number" &&
-    typeof order.budget_max === "number" &&
-    order.budget_max > 0
-  ) {
+  } else if (s.verdict === "BID") {
     // Sanity-диапазон только для BID: для PASS модель ставит фиктивный bid.
-    // budget_max = 0 встречается в API (часть hourly) — тогда диапазон не проверяем.
-    const lo = order.budget_min * 0.5;
-    const hi = Math.min(order.budget_max * 1.5, 50000);
-    if (s.bid_amount < lo || s.bid_amount > hi) {
-      errors.push(
-        `bid_amount ${s.bid_amount} outside sanity range [${lo}, ${hi}]`
-      );
+    // Проверяем в родной валюте заказа (budget_*_original); fallback на USD-поля.
+    const native =
+      typeof order.budget_min_original === "number" &&
+      typeof order.budget_max_original === "number" &&
+      order.budget_max_original > 0;
+    const usd =
+      !native &&
+      typeof order.budget_min === "number" &&
+      typeof order.budget_max === "number" &&
+      order.budget_max > 0;
+    if (native || usd) {
+      const minB = native ? order.budget_min_original : order.budget_min;
+      const maxB = native ? order.budget_max_original : order.budget_max;
+      const lo = minB * 0.5;
+      const hi = Math.min(maxB * 1.5, 50000);
+      if (s.bid_amount < lo || s.bid_amount > hi) {
+        errors.push(
+          `bid_amount ${s.bid_amount} outside sanity range [${lo}, ${hi}] (${native ? order.currency_code : "USD"})`
+        );
+      }
     }
   }
   if (
@@ -194,18 +240,75 @@ export function validateScore(s: any, order: Order): string[] {
   return errors;
 }
 
+function feeFor(order: Order, bid: number, rate: number): number {
+  // Freelancer fee в родной валюте: fixed — 10% с минимумом $5 (в валюте заказа),
+  // hourly — плоско 10%, без минимума.
+  return order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5 * rate);
+}
+
 function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
-  const bid = s.bid_amount as number;
-  // Freelancer fee: fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
-  // bid = 0 (PASS-заглушка) → fee/net = 0, без отрицательного net.
-  const fee = bid <= 0 ? 0 : order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5);
-  const net = Math.round((bid - fee) * 100) / 100;
+  const rate = orderRate(order);
+  let bid = s.bid_amount as number;
+  let fee = 0;
+  let net = 0;
   // Кодовый пересчёт value_score — LLM-арифметике не доверяем.
-  // rate = net / ai_hours (USD/час с учётом AI-агентов); score = rate / targetHourly * 100.
-  let valueScore =
-    net > 0
-      ? Math.min(100, Math.round((net / s.ai_hours / cfg.targetHourly) * 100))
-      : 0;
+  // bid_amount и net_amount — в родной валюте заказа; score считаем в USD-пересчёте:
+  // net_usd = net / rate; rate_per_hour = net_usd / ai_hours; score = rate / targetHourly * 100.
+  let valueScore = 0;
+  if (s.verdict === "BID" && bid > 0) {
+    bid = roundBid(bid);
+    // Пол: не ниже 70% середины вилки в родной валюте.
+    let floor = 0;
+    if (order.budget_max_original > 0) {
+      floor = (0.7 * (order.budget_min_original + order.budget_max_original)) / 2;
+      if (bid < floor) bid = roundBidUp(floor);
+    }
+    // Sanity-кап: не выше 150% верха вилки.
+    if (order.budget_max_original > 0) {
+      const cap = order.budget_max_original * 1.5;
+      if (bid > cap) bid = roundBidDown(cap);
+    }
+    const scoreFor = (b: number) => {
+      const f = feeFor(order, b, rate);
+      const n = b - f;
+      return Math.min(
+        100,
+        Math.round((toUsd(n, rate) / s.ai_hours / cfg.targetHourly) * 100)
+      );
+    };
+    const step = gridStep(bid);
+    const down = roundBidDown(bid);
+    const up = down + step;
+    // Соседние точки сетки в пределах floor/cap.
+    const candidates = [bid];
+    if (down !== bid && down >= floor && (order.budget_max_original <= 0 || down <= order.budget_max_original * 1.5)) {
+      candidates.push(down);
+    }
+    if (up !== bid && (order.budget_max_original <= 0 || up <= order.budget_max_original * 1.5)) {
+      candidates.push(up);
+    }
+    const bidScore = scoreFor(bid);
+    // Если ближайшая точка ниже порога, а соседняя (в пределах cap) — нет, берём соседнюю.
+    if (bidScore < cfg.bidMinScore) {
+      const better = candidates
+        .filter((c) => c !== bid)
+        .map((c) => ({ c, sc: scoreFor(c) }))
+        .filter((x) => x.sc >= cfg.bidMinScore)
+        .sort((a, b2) => b2.sc - a.sc)[0];
+      if (better) {
+        bid = better.c;
+        valueScore = better.sc;
+      } else {
+        valueScore = bidScore;
+      }
+    } else {
+      valueScore = bidScore;
+    }
+    fee = feeFor(order, bid, rate);
+    net = Math.round((bid - fee) * 100) / 100;
+    // score пересчитываем от финального net (совпадает с scoreFor(bid), но для ясности).
+    valueScore = scoreFor(bid);
+  }
   let verdict: "BID" | "PASS" = s.verdict;
   if (verdict === "BID" && valueScore < cfg.bidMinScore) {
     console.warn("scoreOrder: BID force-passed by code recheck", {
@@ -307,9 +410,16 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     raw: raw.slice(0, 500),
   });
 
+  const nativeBudget =
+    typeof order.budget_min_original === "number" &&
+    typeof order.budget_max_original === "number" &&
+    order.budget_max_original > 0;
+  const hintMin = nativeBudget ? order.budget_min_original : order.budget_min;
+  const hintMax = nativeBudget ? order.budget_max_original : order.budget_max;
+  const hintCurrency = nativeBudget ? order.currency_code : "USD";
   const bidHint =
-    typeof order.budget_max === "number" && order.budget_max > 0
-      ? `If verdict is BID, bid_amount must be within [${order.budget_min * 0.5}, ${Math.min(order.budget_max * 1.5, 50000)}]; for PASS use 0 for bid_amount and delivery_days.`
+    typeof hintMax === "number" && hintMax > 0
+      ? `If verdict is BID, bid_amount (in ${hintCurrency}) must be within [${hintMin * 0.5}, ${Math.min(hintMax * 1.5, 50000)}]; for PASS use 0 for bid_amount and delivery_days.`
       : "For PASS use 0 for bid_amount and delivery_days.";
   const retryMessages = [
     ...messages,
@@ -369,9 +479,32 @@ export function buildBidMessages(
   ];
 }
 
+// Plaintext-санитайзер текста ставки: ASCII-only (платформа/клиенты коверкают
+// юникод-типографику и Markdown). Текст не ломаем — заменяем, остатки логируем.
+export function sanitizeBidText(text: string): string {
+  let t = text;
+  t = t.replace(/[\u2014\u2013]/g, "-"); // em/en dash
+  t = t.replace(/\u2192/g, "->"); // стрелка
+  t = t.replace(/[\u00AB\u00BB\u201C\u201D]/g, '"'); // кавычки-ёлочки и лапки
+  t = t.replace(/[\u2018\u2019]/g, "'"); // одинарные кавычки
+  t = t.replace(/\u2022/g, "-"); // маркер списка
+  t = t.replace(/\u2026/g, "..."); // многоточие
+  // Markdown: жирный/подчёркивание/зачёркивание/бэктики — удалить символы.
+  t = t.replace(/\*\*|__|~~|`/g, "");
+  // Заголовочные маркеры "### " в начале строки.
+  t = t.replace(/^#{1,6}\s+/gm, "");
+  const nonAscii = Array.from(
+    new Set(Array.from(t).filter((ch) => (ch.codePointAt(0) ?? 0) > 127))
+  );
+  if (nonAscii.length > 0) {
+    console.warn("sanitizeBidText: non-ASCII characters remain", nonAscii);
+  }
+  return t.trim();
+}
+
 export async function generateBidText(
   env: Env,
   messages: { role: string; content: string }[]
 ): Promise<string> {
-  return (await chat(env, messages)).trim();
+  return sanitizeBidText(await chat(env, messages));
 }

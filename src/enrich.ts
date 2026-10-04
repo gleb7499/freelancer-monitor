@@ -1,15 +1,16 @@
-import type { Env, Order, OwnerInfo } from "./types";
+import type { Env, Order, ProjectClientInfo } from "./types";
 import { getConfig } from "./config";
 import { normalizeProject } from "./parser";
-
-// Пользовательский API Freelancer. В wrangler.toml не вынесен сознательно
-// (одна константа, вторая база рядом с projects/0.1) — оставляем здесь.
-// Проверено live 2026-10-03: GET /api/users/0.1/users/{id} работает без авторизации.
-const USERS_API_BASE = "https://www.freelancer.com/api/users/0.1";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const FETCH_TIMEOUT_MS = 15000;
+
+// Открытые точки Freelancer API (без авторизации, нужен только User-Agent
+// обычного браузера):
+// - projects/0.1/projects/ — выдача проектов по id (fetchProjectsByIds);
+// - projects/0.1/projects/seo — данные заказчика по seo_url: verification,
+//   рейтинг работодателя, other_employer_jobs (проверено live 2026-10-04).
 
 // Своя копия fetchProjectsByIds: источник истины здесь, parser.ts держит
 // только normalizeProject.
@@ -38,63 +39,72 @@ export async function fetchProjectsByIds(env: Env, ids: number[]): Promise<Order
   return (data.result.projects ?? []).map((project) => normalizeProject(project, "alerts"));
 }
 
-export type { OwnerInfo };
+// GET /api/projects/0.1/projects/seo?seo_url=<slug>&webapp=1&compact=true
+// Открытая точка: отдаёт result.client (verification, rating,
+// registration_unixtime, address) и result.other_employer_jobs — другие
+// открытые заказы работодателя (проверено live 2026-10-04).
+// seoSlug — часть order.url после "https://www.freelancer.com/projects/".
+// Любая ошибка (404, не-JSON, сеть) → null, не бросает.
+export async function fetchProjectClient(env: Env, seoSlug: string): Promise<ProjectClientInfo | null> {
+  const slug = seoSlug.startsWith("https://www.freelancer.com/projects/")
+    ? seoSlug.slice("https://www.freelancer.com/projects/".length)
+    : seoSlug;
+  if (!slug) return null;
 
-// GET /api/users/0.1/users/{id}?reputation=true&employer_reputation=true&compact=true
-// Поля reputation.* / employer_reputation.* приходят только с флагами
-// reputation=true / employer_reputation=true (проверено live 2026-10-03).
-// payment_verified и открытые заказы анонимно недоступны — null.
-export async function fetchOwnerInfo(env: Env, ownerId: number): Promise<OwnerInfo | null> {
-  const url = new URL(`${USERS_API_BASE}/users/${ownerId}`);
-  url.searchParams.set("reputation", "true");
-  url.searchParams.set("employer_reputation", "true");
+  const url = new URL("https://www.freelancer.com/api/projects/0.1/projects/seo");
+  url.searchParams.set("seo_url", slug);
+  url.searchParams.set("webapp", "1");
   url.searchParams.set("compact", "true");
 
-  const response = await fetch(url.toString(), {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(`fetchOwnerInfo: HTTP ${response.status}`);
-  }
-  const data = (await response.json()) as {
+  let data: {
     status?: string;
     result?: {
-      id?: number;
-      username?: string | null;
-      reputation?: {
-        entire_history?: {
-          overall?: number | null;
-          reviews?: number | null;
-          completion_rate?: number | null;
-          rehire_rate?: number | null;
+      client?: {
+        registration_unixtime?: unknown;
+        address?: { city?: unknown; country?: unknown; country_code?: unknown } | null;
+        rating?: { average?: unknown; review_count?: unknown } | null;
+        verification?: {
+          payment_verified?: unknown;
+          email_verified?: unknown;
+          profile_complete?: unknown;
+          phone_verified?: unknown;
+          deposit_made?: unknown;
         } | null;
       } | null;
-      employer_reputation?: {
-        entire_history?: {
-          overall?: number | null;
-          complete?: number | null;
-          rehire_rate?: number | null;
-        } | null;
-      } | null;
-    };
+      other_employer_jobs?: unknown;
+    } | null;
   };
+  try {
+    const response = await fetch(url.toString(), {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) return null;
+    data = (await response.json()) as typeof data;
+  } catch {
+    return null;
+  }
   if (data.status !== "success" || !data.result) return null;
-  const r = data.result;
-  const rh = r.reputation?.entire_history ?? undefined;
-  const eh = r.employer_reputation?.entire_history ?? undefined;
+
+  const client = data.result.client;
+  if (!client) return null;
+
+  const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+
+  const otherJobs = data.result.other_employer_jobs;
+
   return {
-    id: r.id ?? ownerId,
-    username: r.username ?? null,
-    reputation_overall: rh?.overall ?? null,
-    reviews: rh?.reviews ?? null,
-    completion_rate: rh?.completion_rate ?? null,
-    rehire_rate: rh?.rehire_rate ?? null,
-    employer_overall: eh?.overall ?? null,
-    employer_complete: eh?.complete ?? null,
-    employer_rehire_rate: eh?.rehire_rate ?? null,
-    payment_verified: null,
-    open_projects: null,
+    payment_verified: bool(client.verification?.payment_verified),
+    deposit_made: bool(client.verification?.deposit_made),
+    email_verified: bool(client.verification?.email_verified),
+    phone_verified: bool(client.verification?.phone_verified),
+    rating: num(client.rating?.average),
+    review_count: num(client.rating?.review_count),
+    registered_ts: num(client.registration_unixtime),
+    country: typeof client.address?.country === "string" ? client.address.country : null,
+    open_projects: Array.isArray(otherJobs) ? otherJobs.length : null,
   };
 }

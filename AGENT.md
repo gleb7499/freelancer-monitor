@@ -46,6 +46,16 @@ Pipeline per tick (every 10 s via DO alarm), all in `src/`:
 
 Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, thresholds, `TARGET_HOURLY`, `BID_MIN_SCORE`). Change them there, not in code.
 
+## Иерархия API Freelancer
+
+- **Приоритет 1 — открытые (публичные, без авторизации) точки API** (достаточно User-Agent обычного браузера):
+  - `projects/0.1/projects/active` — выдача новых проектов (основной канал);
+  - `projects/0.1/projects/seo` — данные заказчика по seo_url: verification (payment_verified, deposit_made и т.д.), рейтинг работодателя, `other_employer_jobs` (проверено 04.10.2026);
+  - `users/0.1/users/{id}` — reputation/employer_reputation; `payment_verified` анонимно не отдаёт.
+- **Приоритет 2 — закрытые точки официального Develop API.** Авторизация работает заголовком `Authorization: Bearer <FL_API_KEY>` (и `Freelancer-OAuth-V1`; проверено 04.10.2026 на `/projects/0.1/bids/`). Ключ хранится в секретах (`FL_API_KEY`), не в коде и не в логах.
+- **Приоритет 3 — закрытый приватный API freelancer.com** (внутренние точки веб-приложения) — только если данных нет в приоритетах 1–2.
+- Правило: секреты только через env/секреты wrangler; значения токенов в логи, отчёты и коммиты не выводить.
+
 ## Telegram commands (webhook `/tg-webhook/<ADMIN_TOKEN>`)
 
 Принимаются только от `TELEGRAM_CHAT_ID` (проверка `chat.id` апдейта):

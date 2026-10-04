@@ -46,13 +46,36 @@ function budgetLine(order: Order): string {
   return `${usd}${suffix}`;
 }
 
+// Курс родной валюты за 1 USD — восстанавливается из бюджета заказа.
+function orderRate(order: Order): number {
+  return order.budget_min > 0 && order.budget_min_original > 0
+    ? order.budget_min_original / order.budget_min
+    : 1;
+}
+
 function truncateText(text: string, maxLen: number): string {
   const clean = text.replace(/\s+/g, " ").trim();
   if (clean.length <= maxLen) return clean;
   return clean.slice(0, maxLen).trimEnd() + "…";
 }
 
-// Карточка только для вердикта BID (после placeBid). PASS в Telegram не идёт.
+// Компактная карточка отказа (PASS): без ставки, сроков, апгрейдов и прочих
+// полей, бессмысленных для отказа — оператор быстро сканирует, почему пропуск.
+export function formatPassCard(order: Order, score: ScoreResult): string {
+  const parts: string[] = [];
+  const typeLabel = order.type === "hourly" ? "hourly" : "fixed";
+  parts.push(`📡 ${order.source ?? "active"} — 💼 <b>${escHtml(order.title)}</b>\n${escHtml(order.niche_id)} · ${typeLabel}`);
+  parts.push(`💰 Бюджет: ${budgetLine(order)}`);
+  parts.push(`👥 Откликов: ${order.bids}`);
+  parts.push(`✅ PASS — ${escHtml(score.reason)}`);
+  if (score.red_flags.length > 0) {
+    parts.push(`🚩 ${escHtml(score.red_flags.join("; "))}`);
+  }
+  parts.push(`🔗 <a href="${escHtml(order.url)}">Открыть заказ</a>`);
+  return parts.join("\n\n");
+}
+
+// Карточка только для вердикта BID (после placeBid).
 export function formatOrderCard(
   order: Order,
   score: ScoreResult,
@@ -74,16 +97,22 @@ export function formatOrderCard(
   parts.push(`👥 Откликов: ${order.bids}${avgPart}`);
   parts.push(`📝 Суть: ${values.SUMMARY}`);
 
-  const rateBase =
+  const rateBaseUsd =
     score.verdict === "BID"
-      ? score.bid_amount
+      ? score.bid_amount / orderRate(order)
       : (order.budget_min + order.budget_max) / 2;
   parts.push(
-    `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBase / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
+    `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBaseUsd / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
   );
   parts.push(`✅ Вердикт: ${score.verdict} — ${values.REASON}`);
   if (score.verdict === "BID") {
-    parts.push(`💵 Ставка: $${score.bid_amount} → на руки $${score.net_amount}`);
+    const sign = order.currency_sign;
+    let line = `💵 Ставка: ${sign}${score.bid_amount} → на руки ${sign}${score.net_amount}`;
+    if (order.currency_code !== "USD") {
+      const r = orderRate(order);
+      line += ` (≈$${Math.round(score.bid_amount / r)} / ≈$${Math.round(score.net_amount / r)})`;
+    }
+    parts.push(line);
   }
   if (order.type === "hourly" && score.weekly_limit_hours !== null) {
     parts.push(`⏱ Weekly limit: ${score.weekly_limit_hours} ч/нед`);

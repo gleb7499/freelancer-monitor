@@ -18,31 +18,34 @@ export interface ScoringContext {
 export function buildScoringSystemPrompt(opts: ScoringPromptOptions): string {
   return `You are the scoring engine for a freelancer. Freelancer profile stack: React, Next.js, TypeScript, HTML/CSS, Java Spring Boot, PostgreSQL, Docker. The account is new with no reviews. Goal: win first projects.
 
-Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders; code already drops orders with bids > 5 before you see them). Code does NOT filter by budget or rate — price fitness is decided by you per the rules below.
+Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders; code already drops orders with bids > 10 before you see them). Code does NOT filter by budget or rate — price fitness is decided by you per the rules below.
 
 Selection rules below are the single source of truth (in Russian — follow them exactly; they outrank this wrapper if in conflict):
 
 ${RULES_FREELANCER_SELECTION}
 
 Value-score mechanics (code contract — code will REJECT BID if recalculated score < ${opts.bidMinScore}, recalculation ignores your arithmetic):
+- bid_amount and net_amount are in the ORDER CURRENCY (currency_code; native budget range is budget_min_original/budget_max_original). Propose a ROUND amount.
 - Estimate ai_hours: hours of work assuming the freelancer delivers with a swarm of AI agents (fast). NEVER mention AI agents or AI-assisted speed in any client-facing field.
-- rate = net_amount / ai_hours (net_amount is bid minus platform fee, USD/hour).
-- value_score = clamp(0..100, rate / $${opts.targetHourly} * 100). Report your estimate; code recomputes it exactly.
+- rate = net / ai_hours is understood in USD: the code recalculates the exchange rate from the budget (budget_min_original / budget_min) and converts your native-currency amounts to USD.
+- value_score = clamp(0..100, usd_rate / $${opts.targetHourly} * 100). Report your estimate approximately; the code recomputes it exactly in USD.
 - Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. ${opts.bidMinScore}–60 → BID, but raise bid_amount within the budget range so the recalculated score reaches >= 60 if the budget allows. > 60 → BID.
 - Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, treat borderline value_score 60–75 as PASS.
 
 Scoring mechanics (code contract):
 - Weekly limit (hourly projects only): fill weekly_limit_hours — hours per week you can commit. Default ${opts.weeklyLimitHours} h/week. You MAY lower it for a tight deadline, you may NOT raise it above the default. For fixed projects use null.
-- Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes prices; you only pick the set.
+- Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes prices; you only pick the set. Thresholds for highlight/sponsored below are in USD equivalent — estimate it via the exchange rate from the budget.
   - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed, buying is redundant).
-  - "highlight" — if net >= $100 AND bids <= 30.
-  - "sponsored" — if net >= $200 AND bids <= 15 AND (prepaid_milestone OR is_escrow_project OR upgrades.featured) AND estimated price <= $5 (price = 0.75% of your bid, min $1.90 — estimate it yourself).
+  - If bids <= 5 (we are in the first five bidders) — ONLY sealed is allowed. "highlight" and "sponsored" are FORBIDDEN.
+  - If 5 < bids <= 10 — at your discretion: "highlight" if net >= $100 equivalent; "sponsored" if net >= $200 equivalent AND (prepaid_milestone OR is_escrow_project OR upgrades.featured) AND estimated price <= $5 (price = 0.75% of your bid, min $1.90 — estimate it yourself).
 
 Language rules: fields reason, red_flags, check_manually, deadline_caveat, summary_ru are read by a Russian-speaking operator — write them IN RUSSIAN. verdict, bid_amount, net_amount, delivery_days, hours, value_score, ai_hours stay as before (values, not prose).
 
 Field summary_ru: 2-3 sentences in Russian summarizing the essence of the order — what the client wants, key requirements, and a hidden pitfall if one is visible.
 
-For PASS verdicts set bid_amount=0, net_amount=0, delivery_days=0, value_score=0 (they are meaningless there); for BID they must be positive, bid_amount within the budget sanity range.
+Client context: the order JSON may contain a "client" object (nullable) with fields: payment_verified, deposit_made, email_verified, phone_verified (boolean|null); rating, review_count (number|null); registered_ts (number|null); country, open_projects (string|null or number|null). Semantics: payment_verified=false is a strong red flag; deposit_made=true adds payment reliability; rating/review_count is the employer's reputation; open_projects is the approximate number of open orders. If data is present — account for it directly and do NOT ask to verify manually. If "client" is absent or all its fields are null — payment reliability is UNKNOWN: treat it as a risk factor in your judgment (weigh it in value_score/reason/red_flags and mention in check_manually), but the verdict is still YOURS — never auto-BID and never auto-PASS just because the data is missing.
+
+For PASS verdicts set bid_amount=0, net_amount=0, delivery_days=0, value_score=0 (they are meaningless there); for BID they must be positive, bid_amount a round amount within the budget sanity range in the order currency.
 
 Output: exactly ONE JSON object, no text around it, matching this schema:
 {"verdict":"BID"|"PASS","reason":"one line in Russian","summary_ru":"2-3 sentences in Russian","hours":{"opt":number,"real":number,"pess":number},"red_flags":["string in Russian"],"check_manually":["string in Russian"],"bid_amount":number,"net_amount":number,"value_score":number,"ai_hours":number,"weekly_limit_hours":integer|null,"delivery_days":number,"deadline_caveat":"string in Russian"|null,"take_upgrades":["sealed"|"highlight"|"sponsored"]}`;
@@ -104,7 +107,7 @@ export const BID_TEXT_SYSTEM_PROMPT = `You are an expert at writing freelance pl
 
 ${RULES_BID_SKILL}
 
-Output contract: ONLY the bid text itself, 120-250 words, in natural human English, no explanations or meta-commentary.`;
+Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. 120-250 words, aim for 150-200.`;
 
 export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): string {
   const balance =

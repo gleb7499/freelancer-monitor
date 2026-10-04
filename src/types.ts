@@ -14,7 +14,7 @@ export interface Order {
   bids: number;
   bid_avg: number | null;
   owner_id: number | null;
-  owner?: OwnerInfo | null;
+  client?: ProjectClientInfo | null;
   description: string;
   language: string;
   submit_ts: number;
@@ -61,20 +61,19 @@ export interface ScoreResult {
 
 export type UpgradeId = "sealed" | "highlight" | "sponsored";
 
-// Информация о заказчике (enrich.fetchOwnerInfo). Анонимный эндпоинт
-// users/0.1 не отдаёт payment_verified и открытые заказы — только OAuth.
-export interface OwnerInfo {
-  id: number;
-  username: string | null;
-  reputation_overall: number | null;
-  reviews: number | null;
-  completion_rate: number | null;
-  rehire_rate: number | null;
-  employer_overall: number | null;
-  employer_complete: number | null;
-  employer_rehire_rate: number | null;
-  payment_verified: null;
-  open_projects: null;
+// Информация о заказчике (enrich.fetchProjectClient). Источник — открытый
+// эндпоинт projects/0.1/projects/seo (проверено live 2026-10-04): verification,
+// рейтинг работодателя, registration_unixtime, other_employer_jobs.
+export interface ProjectClientInfo {
+  payment_verified: boolean | null;
+  deposit_made: boolean | null;
+  email_verified: boolean | null;
+  phone_verified: boolean | null;
+  rating: number | null;
+  review_count: number | null;
+  registered_ts: number | null;
+  country: string | null;
+  open_projects: number | null;
 }
 
 export interface Env {

@@ -12,7 +12,7 @@ const INSERT_BATCH = 20;
 
 // Единственный жёсткий статический фильтр алерт-канала: конкуренция.
 // Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM.
-const MAX_BIDS_GATE = 5;
+const MAX_BIDS_GATE = 10;
 
 function chunks<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -83,8 +83,8 @@ async function insertSeen(env: Env, records: SeenRecord[]): Promise<void> {
 }
 
 // Заказы с источника (официальный API) — единственный жёсткий фильтр:
-// bids > 5. Все увиденные помечаются в seen (source из параметра);
-// bids>5 идут со status rejected reason `rej:bids>5`.
+// bids > 10. Все увиденные помечаются в seen (source из параметра);
+// bids>10 идут со status rejected reason `rej:bids>10`.
 // Возвращает заказы, прошедшие гейт.
 export async function markAlertSeen(env: Env, orders: Order[], source = "active"): Promise<Order[]> {
   if (orders.length === 0) return [];
@@ -93,7 +93,7 @@ export async function markAlertSeen(env: Env, orders: Order[], source = "active"
     id: o.id,
     source,
     status: o.bids > MAX_BIDS_GATE ? "rejected" : "passed",
-    reason: o.bids > MAX_BIDS_GATE ? "rej:bids>5" : null,
+    reason: o.bids > MAX_BIDS_GATE ? "rej:bids>10" : null,
     ts: Date.now(),
   }));
   await insertSeen(env, records);

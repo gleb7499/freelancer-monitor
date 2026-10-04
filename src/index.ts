@@ -1,6 +1,6 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
-import { fetchOwnerInfo } from "./enrich";
+import { fetchProjectClient } from "./enrich";
 import { filterNew, markAlertSeen, seenStats24h } from "./service";
 import { fetchActiveOrders } from "./sources/freelancer-active";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
@@ -10,7 +10,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
+import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
@@ -110,17 +110,17 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       stats.alertsFetched = active.orders.length;
       log("active.fetched", { count: active.orders.length });
       const fresh = await filterNew(env, active.orders);
-      // Единственный статический гейт: bids > 5.
+      // Единственный статический гейт: bids > 10.
       const kept = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length });
       ordersToScore.push(...kept);
-      // Test-режим: уведомляем и об отклонённых гейтом (причина — bids>5).
+      // Test-режим: уведомляем и об отклонённых гейтом (причина — bids>10).
       if (mode === "test") {
         const keptIds = new Set(kept.map((o) => o.id));
         for (const order of fresh) {
           if (keptIds.has(order.id)) continue;
-          await sendTelegram(env, `[TEST] гейт bids>5\n\n${formatRejectCard(order, `уже ${order.bids} откликов (лимит ≤5 до LLM)`)}`);
+          await sendTelegram(env, `[TEST] гейт bids>10\n\n${formatRejectCard(order, `уже ${order.bids} откликов (лимит ≤10 до LLM)`)}`);
         }
       }
     }
@@ -136,14 +136,14 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     return stats;
   }
 
-  // Enrich: информация о заказчике уходит в JSON скорингу.
+  // Enrich: данные заказчика (verification, рейтинг работодателя, открытые
+  // заказы) с открытой точки projects/seo уходят в JSON скорингу.
   for (const order of ordersToScore) {
-    if (order.owner_id === null) continue;
     try {
-      order.owner = await fetchOwnerInfo(env, order.owner_id);
+      order.client = await fetchProjectClient(env, order.url);
     } catch (e) {
-      order.owner = null;
-      console.warn("fetchOwnerInfo failed:", { id: order.id, err: String(e) });
+      order.client = null;
+      console.warn("fetchProjectClient failed:", { id: order.id, err: String(e) });
     }
   }
 
@@ -201,7 +201,7 @@ async function processOrder(
     if (score.verdict === "PASS") {
       // Test-режим: PASS тоже уведомляем — для анализа качества скоринга.
       if (mode === "test") {
-        await sendTelegram(env, `[TEST] PASS\n\n${formatOrderCard(order, score, null)}`);
+        await sendTelegram(env, `[TEST] PASS\n\n${formatPassCard(order, score)}`);
       }
       return "pass";
     }

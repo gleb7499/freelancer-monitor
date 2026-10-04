@@ -11,19 +11,9 @@ export interface BidResult {
 }
 
 // Разместить ставку через официальный API.
-// Валюта amount: API ждёт сумму в валюте проекта. score.bid_amount хранится в USD
-// (парсер пересчитывал бюджет через currency.exchange_rate). Обратный пересчёт:
-// для USD — как есть; для прочих валют восстанавливаем курс из бюджета заказа
-// (budget_min_original / budget_min). Курса на момент ставки у нас нет — это
-// осознанная погрешность, вилка бюджета её перекрывает.
-function toProjectCurrency(order: Order, bidUsd: number): number {
-  if (order.currency_code === "USD") return bidUsd;
-  if (order.budget_min > 0 && order.budget_min_original > 0) {
-    const rate = order.budget_min_original / order.budget_min;
-    return Math.round(bidUsd * rate * 100) / 100;
-  }
-  return bidUsd;
-}
+// Валюта amount: API ждёт сумму в валюте проекта. score.bid_amount уже хранится
+// в родной валюте заказа (LLM предлагает сумму в currency_code, код нормализует) —
+// пересчёт не нужен, отправляем как есть.
 
 export async function placeBid(
   env: Env,
@@ -78,7 +68,7 @@ export async function placeBid(
     project_id: order.id,
     bidder_id: Number(cfg.flUserId),
     description: bidText,
-    amount: toProjectCurrency(order, score.bid_amount),
+    amount: score.bid_amount,
     period: score.delivery_days,
     milestone_percentage: 100,
   };
