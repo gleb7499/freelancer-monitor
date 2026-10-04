@@ -91,6 +91,9 @@ export interface Env {
   FL_USER_ID: string;
   FL_AUTH_HASH: string;
   FL_OAUTH_TOKEN: string;
+  // Ключ Develop API (закрытые точки, авторизация Authorization: Bearer).
+  // Фолбэк, когда OAuth-токена нет (например, локальный wrangler dev).
+  FL_API_KEY?: string;
   TARGET_HOURLY: string;
   BID_MIN_SCORE: string;
 }

@@ -20,6 +20,7 @@ export function getConfig(env: Env) {
     flUserId: (env.FL_USER_ID ?? "").trim(),
     flAuthHash: (env.FL_AUTH_HASH ?? "").trim(),
     flOauthToken: (env.FL_OAUTH_TOKEN ?? "").trim(),
+    flApiKey: (env.FL_API_KEY ?? "").trim(),
     targetHourly: num(env, "TARGET_HOURLY", 20),
     bidMinScore: num(env, "BID_MIN_SCORE", 30),
   };

@@ -15,6 +15,7 @@ import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
 import { getBidsBalance } from "./bids-balance";
+import { checkMilestones } from "./milestones";
 
 interface TickStats {
   mode: Mode;
@@ -64,6 +65,22 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   const cfg = getConfig(env);
   const startedAt = Date.now();
   log("tick.start", { trigger, mode });
+
+  // Запрос этапных платежей по назначенным ставкам — независимо от свежих
+  // заказов и bids-баланса (этапы bids не тратят). Ошибка не должна ломать тик.
+  try {
+    const ms = await checkMilestones(env);
+    if (ms.awarded.length > 0 || ms.requested.some((r) => !r.error)) {
+      log("milestones.checked", {
+        awarded: ms.awarded.length,
+        requested: ms.requested.filter((r) => !r.error).length,
+        skipped: ms.skipped.map((s) => s.reason),
+      });
+    }
+  } catch (e) {
+    console.error("milestones failed:", e);
+    await logError(env, "milestones.error", { message: String(e).slice(0, 300) });
+  }
 
   // Гейт bids-баланса — ДО опроса заказов: при balance = 0 система в idle
   // (нет ни опроса API, ни LLM) до восстановления хотя бы одного bid.
@@ -611,6 +628,25 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/test/bids-balance") {
         return jsonResponse(await getBidsBalance(env));
+      }
+      if (request.method === "POST" && url.pathname === "/test/milestones") {
+        let body: { dryRun?: boolean; force?: boolean } = {};
+        const raw = await request.text();
+        if (raw.trim() !== "") {
+          try {
+            body = JSON.parse(raw) as { dryRun?: boolean; force?: boolean };
+          } catch {
+            return jsonResponse({ error: "invalid JSON body" }, 400);
+          }
+        }
+        // Без тела — по умолчанию пробный прогон, без реальных запросов.
+        const dryRun = body.dryRun ?? true;
+        try {
+          const result = await checkMilestones(env, { dryRun, force: true });
+          return jsonResponse(result);
+        } catch (e) {
+          return jsonResponse({ error: String(e).slice(0, 300) }, 502);
+        }
       }
       if (url.pathname === "/admin/fl-auth") {
         return await handleFlAuth(request, env);
