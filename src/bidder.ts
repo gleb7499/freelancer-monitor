@@ -36,9 +36,16 @@ export async function placeBid(
     return { placed: false, reason: "test-mode" };
   }
 
-  // live-режим без OAuth-токена — алертим через reason, не падаем.
+  // live-режим без токенов — алертим через reason, не падаем.
+  // Основной путь — OAuth-токен аккаунта; фолбэк — ключ Develop API
+  // (Authorization: Bearer, проверено 04.10.2026).
   const cfg = getConfig(env);
-  if (!cfg.flOauthToken) {
+  const authHeaders: Record<string, string> | null = cfg.flOauthToken
+    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
+    : cfg.flApiKey
+      ? { Authorization: `Bearer ${cfg.flApiKey}` }
+      : null;
+  if (!authHeaders) {
     console.error("bidder.oauth-missing", { id: order.id });
     return { placed: false, reason: "oauth-missing" };
   }
@@ -64,19 +71,32 @@ export async function placeBid(
     return { placed: false, reason: "preflight-failed" };
   }
 
+  // Этапная оплата по политике: fixed >= ~$150 на руки ИЛИ клиент без
+  // верификации — стартовый этап 30%, иначе одним этапом в конце.
+  const rate =
+    order.budget_min > 0 && order.budget_min_original > 0
+      ? order.budget_min_original / order.budget_min
+      : 1;
+  const netUsd = score.net_amount / rate;
+  const milestonePercentage =
+    order.type === "fixed" &&
+    (netUsd >= 150 || order.client?.payment_verified === false)
+      ? 30
+      : 100;
+
   const body = {
     project_id: order.id,
     bidder_id: Number(cfg.flUserId),
     description: bidText,
     amount: score.bid_amount,
     period: score.delivery_days,
-    milestone_percentage: 100,
+    milestone_percentage: milestonePercentage,
   };
 
   const res = await fetch(`${cfg.freelancerBase}/bids/`, {
     method: "POST",
     headers: {
-      "Freelancer-OAuth-V1": cfg.flOauthToken,
+      ...authHeaders,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),

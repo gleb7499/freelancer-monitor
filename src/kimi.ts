@@ -246,7 +246,7 @@ function feeFor(order: Order, bid: number, rate: number): number {
   return order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5 * rate);
 }
 
-function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
+export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   const rate = orderRate(order);
   let bid = s.bid_amount as number;
   let fee = 0;

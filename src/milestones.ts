@@ -25,7 +25,7 @@ interface RawBid {
 // Детект назначения ставки — толерантный: точные значения award_status /
 // frontend_bid_status по живой назначенной ставке пока неизвестны, поэтому
 // ловим либо заполненный time_awarded, либо строку со "award"/"accept".
-function isAwarded(bid: RawBid): boolean {
+export function isAwarded(bid: RawBid): boolean {
   if (typeof bid.time_awarded === "number") return true;
   for (const field of [bid.award_status, bid.frontend_bid_status]) {
     if (typeof field === "string" && /award|accept/i.test(field)) return true;
