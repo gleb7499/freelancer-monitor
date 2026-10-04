@@ -117,6 +117,18 @@ export async function placeBid(
   }
 
   const text = (await res.text()).slice(0, 300);
+  // Текст ошибки API для карточки: только безопасные ASCII-символы (заголовок
+  // уходит в Telegram с HTML-parse, латиница без разметки).
+  const apiMessage = (() => {
+    try {
+      const m = (JSON.parse(text) as { message?: unknown }).message;
+      if (typeof m !== "string" || m.trim() === "") return null;
+      const clean = m.replace(/[^a-zA-Z0-9 .,'$%()\/:_-]/g, " ").replace(/\s+/g, " ").trim();
+      return clean.slice(0, 140);
+    } catch {
+      return null;
+    }
+  })();
   if (text.toLowerCase().includes("already")) {
     return { placed: false, reason: "already-bid" };
   }
@@ -135,6 +147,14 @@ export async function placeBid(
     console.error("bidder.insufficient-balance", { id: order.id, status: res.status, text });
     return { placed: false, reason: "insufficient-balance" };
   }
+  // Крипто/премиум-заказы требуют верификации аккаунта (403 RESTRICTED...).
+  if (
+    res.status === 403 &&
+    (lower.includes("verified") || lower.includes("verification") || lower.includes("restricted"))
+  ) {
+    console.error("bidder.verification-required", { id: order.id, text });
+    return { placed: false, reason: "verification-required" };
+  }
   console.error("bidder.failed", { id: order.id, status: res.status, text });
-  return { placed: false, reason: `http-${res.status}` };
+  return { placed: false, reason: `http-${res.status}${apiMessage ? `: ${apiMessage}` : ""}` };
 }

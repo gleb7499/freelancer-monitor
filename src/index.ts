@@ -270,6 +270,8 @@ async function processOrder(
     } else if (bidResult.reason === "insufficient-balance") {
       header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
       await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
+    } else if (bidResult.reason === "verification-required") {
+      header = `⚠️ Отклик НЕ отправлен: проект требует верификации аккаунта (крипто/премиум) — наш аккаунт не верифицирован`;
     } else {
       header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
     }

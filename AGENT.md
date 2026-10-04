@@ -168,6 +168,9 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
   (username анонимно отдаёт `users/0.1/users/{id}?compact=true`).
 - Часть заказов требует минимальный баланс ~$20 на счёту для ставки — текст ошибки ловим
   по словам balance/deposit/funds/insufficient (реальный текст ещё не видели).
+- **Cryptocurrency-проекты требуют верификации аккаунта (Freelancer Verified)** — иначе
+  POST bids → 403 `RESTRICTED_FROM_BIDDING_PREMIUM_VERIFIED_JOB` (проверено 04.10.2026).
+  Наш аккаунт не верифицирован → крипто-проекты в правилах отсечены на уровне скоринга.
 - `projects/seo` `result.client`: `verification{payment_verified, deposit_made, email_verified,
   phone_verified, profile_complete}`, `rating{average, review_count}`, `registration_unixtime`,
   `address`; `other_employer_jobs` — примерный список открытых заказов клиента.

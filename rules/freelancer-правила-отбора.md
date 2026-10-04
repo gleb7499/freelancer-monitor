@@ -118,6 +118,10 @@ amount, description) → работодатель принимает → эта�
   вроде «я не знаю X».
 - **Полностью чужой стек** — PASS: Flutter, React Native, .NET, Unity,
   PHP/WordPress/CMS-конструкторы, мобильная разработка, дизайн-only.
+- **Cryptocurrency-проекты — всегда PASS**: категория требует верификации
+  аккаунта Freelancer (Verified), наш аккаунт не верифицирован — API отклонит
+  ставку с 403 RESTRICTED_FROM_BIDDING_PREMIUM_VERIFIED_JOB (проверено
+  04.10.2026). Не трать цикл скоринга на них.
 - Чистый дизайн без кода (UI/UX, «design only») — PASS.
 
 ### Контекст bids-ресурса
