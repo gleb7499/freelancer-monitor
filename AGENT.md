@@ -6,12 +6,12 @@ Cloudflare Worker (TypeScript) that monitors Freelancer.com via the official pub
 
 ## Modes and hard rules
 
-1. **Auto-bidding is real.** `src/bidder.ts` posts bids via the official API with OAuth (`FL_OAUTH_TOKEN`). The mode gate decides whether the POST happens:
+1. **Auto-bidding is real.** `src/bidder.ts` posts bids via the official API: основной путь — OAuth (`FL_OAUTH_TOKEN`), фолбэк — `Authorization: Bearer <FL_API_KEY>` (ключ Develop API; авторизация проверена 04.10.2026). The mode gate decides whether the POST happens:
    - `test` (default) — full pipeline runs, bid is **not** sent (card marked `[TEST] ставка НЕ отправлена`);
    - `live` — bid is placed for real; the Telegram card reports placed/failed;
    - `off` — tick exits immediately, nothing happens.
    Mode lives in KV key `mode`, switched via Telegram `/mode test|live|off` or `setMode`. Never silently flip a run to `live`.
-2. **Secrets never in the repo.** `KIMI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_TOKEN`, `FL_OAUTH_TOKEN` exist only as Worker secrets / `.dev.vars` (gitignored). Never commit them, never log them.
+2. **Secrets never in the repo.** `KIMI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ADMIN_TOKEN`, `FL_USER_ID`, `FL_AUTH_HASH`, `FL_API_KEY` exist only as Worker secrets / `.dev.vars` (gitignored). `FL_OAUTH_TOKEN` — опционален (в проде на 04.10.2024 отсутствует; рабочая авторизация — Bearer-ключ). Never commit them, never log them.
 3. **Never commit `.dev.vars`.** Example file: `.dev.vars.example`.
 4. Repo is public. Treat anything added to git as published.
 
@@ -33,14 +33,15 @@ Pipeline per tick (every 10 s via DO alarm), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*` + Telegram webhook (`/tg-webhook/<ADMIN_TOKEN>`) with operator commands
 - `sources/freelancer-active.ts` — единственный канал: официальный публичный API `GET {FREELANCER_API_BASE}/projects/active/` (без auth, без кук). Параметры: 11 скиллов `jobs[]` (9,323,607,741,759,979,1002,1042,2370,2376,2703 — как у saved search «Main Search»), `project_types[]=fixed|hourly`, `languages[]=en`, `sort_field=submitdate`, limit 25, full_description. Курсор — KV `active:last_submit` (unix sec, только `submitdate > cursor`); bootstrap — now-300 c (последние 5 минут). Опрос каждый тик DO (10 с; throttle KV `active:last_fetch` защищает от повторов внутри тика). Записи нормализуются `normalizeProject` из parser.ts
-- `enrich.ts` — `fetchProjectsByIds` (проекты по id из алертов; фильтр `projects[]`, не `ids[]`) и `fetchOwnerInfo` (публичный `users/0.1`, reputation/employer_reputation; `payment_verified` и открытые заказы анонимно недоступны — `null`). Инфа о заказчике кладётся в `order.owner` и уходит в JSON скорингу
-- `parser.ts` — только `normalizeProject` (Freelancer project → `Order`, бюджеты пересчитываются в USD через `currency.exchange_rate`, `owner_id` извлекается в `Order`)
-- `service.ts` — D1 dedup (table `seen`: id/source/status/reason/ts, retention 30 days, daily cleanup), alert-гейт `markAlertSeen` (единственный статический фильтр: bids > 5 → rejected `rej:bids>5`, source `alert`), `markRejected` (внешние отказы, напр. `rej:no-bids`), `seenStats24h` для `/status`
-- `bids-balance.ts` — баланс bids. Основной источник: read-only `ajax-api/projects/getBidLimit.php` (веб-авторизация freelancer-auth-v2, как у alerts) — отдаёт `bidsRemaining`, `bidLimit`, `bidRefreshTime` (сек до регена); официальный API баланс не отдаёт. Fallback — леджер D1 (`bid_ledger`, миграция `0002_bid_ledger.sql`): `balance = lastKnown + floor((now - lastTs) / 7.5ч) - spent`, кап 100; `/setbids N` — ручная сверка. `balance === 0` в тике → заказы не скорятся, seen со status rejected `rej:no-bids` (alerts без возврата — иначе зависнут)
-- `bidder.ts` — `placeBid`: pre-flight свежий bid_count (bids > 10 → cancel), обратный пересчёт USD → валюта проекта, POST `/bids/` с `Freelancer-OAuth-V1`; успех → `recordBidSpent`. Возвращает `BidResult {placed, bidId?, reason?}`; mode `test`/`off` и отсутствие OAuth/текста — причины отказа, не исключения
-- `kimi.ts` — LLM scoring, JSON-schema output, retries, validation; `scoreOrder` сам подтягивает bids-баланс в контекст
-- `prompts.ts` — scoring prompts (value-score + стек); operator-facing fields (`reason`, `red_flags`, `check_manually`, `deadline_caveat`, `summary_ru`) are written in Russian by design
-- `telegram.ts` — карточки только для вердикта BID (PASS в Telegram не идёт), alerts throttled to 1/hour
+- `enrich.ts` — `fetchProjectsByIds` (проекты по id), `fetchProjectClient` (открытая точка `projects/seo` по seo_url: verification/рейтинг/открытые заказы заказчика → `order.client` в JSON скорингу) и `fetchPortfolio` (портфолио профиля через Develop API, кэш KV `portfolio:cache` 6 ч; уходит в контекст генерации текста ставки)
+- `parser.ts` — только `normalizeProject` (Freelancer project → `Order`, бюджеты пересчитываются в USD через `currency.exchange_rate`; `owner_id` анонимно всегда null — поле удалено)
+- `service.ts` — D1 dedup (table `seen`: id/source/status/reason/ts, retention 30 days, daily cleanup), alert-гейт `markAlertSeen` (единственный статический фильтр: bids > 10 → rejected `rej:bids>10`), `seenStats24h` для `/status`
+- `bids-balance.ts` — баланс bids. Основной источник: read-only `ajax-api/projects/getBidLimit.php` (веб-авторизация freelancer-auth-v2) — отдаёт `bidsRemaining`, `bidLimit`, `bidRefreshTime`; официальный API баланс не отдаёт. Fallback — леджер D1 (`bid_ledger`, миграция `0002_bid_ledger.sql`): реген 1 bid / 7.5 ч, кап 100. `balance === 0` в тике → idle (опрос и LLM остановлены), заказы не помечаются — курсор стоит, при восстановлении баланса выдача догоняется
+- `bidder.ts` — `placeBid`: pre-flight свежий bid_count (bids > 10 → cancel), ставка уже в валюте проекта (пересчёта нет), POST `/bids/` (OAuth или Bearer-ключ); `milestone_percentage` 30% для fixed ≥ ~$150 или клиента без верификации, иначе 100; детект ошибки минимального баланса (~$20) по словам balance/deposit/funds/insufficient → reason `insufficient-balance`. Успех → `recordBidSpent`. Возвращает `BidResult {placed, bidId?, reason?}`; mode `test`/`off` и отсутствие токенов/текста — причины отказа, не исключения
+- `milestones.ts` — каждый тик (throttle KV `ms:last_check`, 5 мин): `GET /bids/?bidders[]=<мы>` → детект назначенных ставок (эвристика: `time_awarded` число или статус со «award»/«accept»; сырые поля логируются `milestones.awarded-bid`) → kickoff-запрос `milestone_requests` на 30% ставки (fixed ≥ ~$100, дедуп KV `ms:req:<bid_id>`, TTL 30 дней) → уведомление в Telegram
+- `kimi.ts` — LLM scoring, JSON-schema output, retries, validation; кодовый пересчёт value_score в USD; округление ставки до сетки (шаг по величине), пол 70% середины вилки, кап 150%; `sanitizeBidText` — ASCII-only пост-проход текста ставки; `scoreOrder` сам подтягивает bids-баланс в контекст
+- `prompts.ts` — кодовая обвязка промптов (контракт JSON, value-score механика, апгрейды: первая пятёрка — только sealed; 6–10 — на усмотрение LLM; семантика полей `order.client`; plaintext-контракт текста ставки). Правила отбора — только из rules/*.md
+- `telegram.ts` — карточки: полная для BID, компактная `formatPassCard` для PASS в test-режиме, `formatRejectCard` для гейта; alerts throttled to 1/hour
 - `mode.ts` — `getMode`/`setMode`, KV `mode`, default `test`
 - `config.ts` / `types.ts` — typed env config, shared types
 
@@ -82,15 +83,33 @@ Note: platform-specific selection rules live in `rules/freelancer-*.md`. More pl
 
 ## Testing
 
+Offline acceptance (no network, no secrets — чистая логика с моками fetch/KV):
+
+```bash
+npm run acceptance   # 63 проверки: скоринг-математика, сетка округления, валюты,
+                     # fee, пол/кап, санитайзер, isAwarded, парсинг client/portfolio,
+                     # карточки (лимит 4096), потолок апгрейдов
+```
+
 Test endpoints (all require header `X-Admin-Token`, except the webhook path):
 
 ```
 GET  /test/kimi-models   — verify Kimi API key and model name
-POST /test/score         — score a sample order end-to-end (пустое тело — возьмёт первый свежий алерт)
+POST /test/score         — score a given order JSON end-to-end (пустое тело — свежий заказ из active)
 POST /test/tick          — run one full pipeline tick manually
+POST /test/milestones    — скан назначенных ставок; dry-run по умолчанию, {"dryRun": false} — реальные запросы
+GET  /test/logs          — кольцевой лог
+GET  /test/bids-balance  — баланс bids
+POST /test/set-webhook   — регистрация webhook Telegram (один раз)
 ```
 
 Before enabling/enlarging `[triggers] crons`, run the tick test and confirm cards arrive in Telegram. After changing `wrangler.toml` bindings, run `wrangler types` and `npm run typecheck`.
+
+## Local development
+
+- `npx wrangler dev` читает `.dev.vars`; локально там **нет** `FL_OAUTH_TOKEN` — закрытые точки и ставки тестируются с `--var FL_API_KEY:<ключ>` (Bearer-фолбэк).
+- Локальная проверка `/test/*` без `ADMIN_TOKEN`: временно добавить обход в `isAuthorized` (`src/index.ts`), проверить, **обязательно убрать до коммита**.
+- Временный файл приёмки исторически лежал в `tmp/` (в gitignore) — теперь стенд живёт в `scripts/acceptance.ts`.
 
 ## Operational notes
 
@@ -99,7 +118,73 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 - First deploy of a fresh clone: create KV namespace, set the secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.
 - Alerts are rate-limited on purpose (1/hour) — don't bypass the limit when changing `telegram.ts`. Card sending is intentionally unlimited.
-- `live`-режим требует валидный `FL_OAUTH_TOKEN` и `FL_USER_ID`; без них `placeBid` возвращает reason (`oauth-missing` / `fl-user-id-missing`), карточка придёт с «⚠️ Отклик НЕ отправлен».
+- `live`-режим требует `FL_USER_ID` и хотя бы один токен авторизации (`FL_OAUTH_TOKEN` или `FL_API_KEY`); без них `placeBid` возвращает reason (`oauth-missing` / `fl-user-id-missing`), карточка придёт с «⚠️ Отклик НЕ отправлен». Ошибка «минимальный баланс ~$20» детектится по тексту ответа и уходит отдельным алертом.
+
+## Production state (2026-10-04)
+
+- **Режим: `live`.** Переключение: Telegram `/mode ...` или
+  `npx wrangler kv key put mode live --namespace-id b629829e784842d3a9c78f612f689974`
+  (namespace id — из `wrangler.toml`). Перед переводом в live — полный цикл приёмки (см. ниже).
+- Воркер: `https://freelancer-monitor.ksenia.workers.dev` (поддомен аккаунта — `ksenia`).
+  Health-check: `curl` на корень → **ожидаем HTTP 404** (это «жив»; 000/5xx — проблема).
+- Аккаунт фрилансера: `gleb7499` (id 94242579). Секреты в проде (7): ADMIN_TOKEN,
+  FL_AUTH_HASH, FL_USER_ID, KIMI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, FL_API_KEY.
+  `FL_OAUTH_TOKEN` отсутствует — рабочая авторизация ставок/этапов/портфолио — Bearer-ключ.
+- Порядок выкладки изменений (установленный паттерн): правки → `npm run typecheck` +
+  `npm run acceptance` → commit → push в `main` (CI деплоит сама: typecheck → wrangler deploy) →
+  проверить `gh run list` (success) → `wrangler deployments list` (свежая версия) → health-check.
+  Для крупных изменений перед live: 10 минут наблюдения каждые 20 сек (воркер + CI), затем
+  перевод режима, затем 20 минут дебаг-окна.
+- Важно: `wrangler secret put` не требует деплоя — секрет подхватывается сразу, но код,
+  который его читает, должен быть задеплоен.
+
+## Работа с оператором (Gleb)
+
+- Telegram-чат бота — основной интерфейс: Gleb шлёт туда скриншоты/карточки и **комментарии,
+  которые являются задачами** («пусть LLM…», «нужно дать придирчивому клиенту…»). Каждый
+  комментарий — отдельная доработка правил/кода.
+- Ошибки/аномалии из карточек («⚠️ Отклик НЕ отправлен: X») — первичный источник баг-репортов:
+  reason из `BidResult` диагностирует причину без логов.
+- Русский язык без англицизмов (глобальное правило пользователя); идентификаторы, имена файлов,
+  API, команды — как есть.
+- Пользователь принимает решения через утверждение плана; при сомнениях в трактовке
+  комментария — уточнить одиночным вопросом (история: «дать придирчивому клиенту почитать
+  отклики» оказалось задачей-критикой откликов, а не фичей архива).
+
+## Проверенные факты API (дополнение к иерархии)
+
+- `GET /projects/0.1/bids/?bidders[]=<id>` отдаёт наши ставки с полями назначения:
+  `award_status`, `frontend_bid_status`, `time_awarded`, `time_accepted`, `complete_status`,
+  `paid_status`, `milestone_percentage`. Детект назначения — эвристика (см. milestones.ts),
+  **не подтверждён живым назначением**: по первому реальному случаю сверить лог
+  `milestones.awarded-bid` и подточить `isAwarded`.
+- `POST /milestone_requests/` создаёт запрос **даже без назначения** (status pending).
+  Удаление тестового запроса: `PUT /milestone_requests/{id}/` с телом `{action:"delete"}`.
+  DELETE-метод — 405.
+- Авторизация Bearer-ключом для `POST /bids/` проверена косвенно: фейковый `project_id=0` →
+  HTTP 500 (валидация), а не 401. Первая реальная live-ставка всё ещё ждёт подтверждения.
+- `GET /users/0.1/portfolios/?users[]=<id>` (Bearer) — элементы портфолио: `title`,
+  `description` (внутри живут демо-ссылки), `files`. Профиль: `https://www.freelancer.com/u/<username>`
+  (username анонимно отдаёт `users/0.1/users/{id}?compact=true`).
+- Часть заказов требует минимальный баланс ~$20 на счёту для ставки — текст ошибки ловим
+  по словам balance/deposit/funds/insufficient (реальный текст ещё не видели).
+- `projects/seo` `result.client`: `verification{payment_verified, deposit_made, email_verified,
+  phone_verified, profile_complete}`, `rating{average, review_count}`, `registration_unixtime`,
+  `address`; `other_employer_jobs` — примерный список открытых заказов клиента.
+
+## Продуктовые решения (контекст, почему код устроен так)
+
+- Ставка — **середина вилки**, якорь ~$10/ч на руки: заказы видны системой через секунды
+  после публикации, 0 откликов ничего не значит, конкуренты идут ближе к середине.
+  (Подробности и пороги — в rules/freelancer-правила-отбора.md, не дублировать в код.)
+- Скидка за новизну аккаунта — только цифрой и только вместе с блоком «новый профиль»;
+  иначе новизну не упоминать. Портфолио-ссылка убедительнее акцента на новизне.
+- `order.client` полностью в null → LLM взвешивает риск сама (авто-BID/авто-PASS запрещены).
+- Этапность: предоплата 30–40% предлагается в тексте отклика и ставится в
+  `milestone_percentage` самой ставки для fixed ≥ ~$150 или клиента без верификации;
+  авто-запрос kickoff-этапа 30% — после назначения (milestones.ts).
+- Текст ставки — строго plain text ASCII (санитайзер постфактум): платформа коверкает
+  юникод-типографику и Markdown.
 
 <!-- serena-memory:v1 -->
 ## Project Memory (Serena)
