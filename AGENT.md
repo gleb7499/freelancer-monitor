@@ -171,6 +171,9 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
 - **Cryptocurrency-проекты требуют верификации аккаунта (Freelancer Verified)** — иначе
   POST bids → 403 `RESTRICTED_FROM_BIDDING_PREMIUM_VERIFIED_JOB` (проверено 04.10.2026).
   Наш аккаунт не верифицирован → крипто-проекты в правилах отсечены на уровне скоринга.
+- **Recruiter-проекты (бейдж RECRUITER, `upgrades.recruiter=true`) — только для Preferred
+  Freelancer**; наш аккаунт не подходит. Код режет такие ставки до POST (reason `preferred-only`).
+  Оба ограничения нередко стоят на одном проекте одновременно.
 - `projects/seo` `result.client`: `verification{payment_verified, deposit_made, email_verified,
   phone_verified, profile_complete}`, `rating{average, review_count}`, `registration_unixtime`,
   `address`; `other_employer_jobs` — примерный список открытых заказов клиента.

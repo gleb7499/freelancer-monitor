@@ -271,7 +271,9 @@ async function processOrder(
       header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
       await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
     } else if (bidResult.reason === "verification-required") {
-      header = `⚠️ Отклик НЕ отправлен: проект требует верификации аккаунта (крипто/премиум) — наш аккаунт не верифицирован`;
+      header = `⚠️ Отклик НЕ отправлен: заказ закрыт для нашего аккаунта — платформа требует верификацию Freelancer (категория Cryptocurrency) либо статус Preferred Freelancer`;
+    } else if (bidResult.reason === "preferred-only") {
+      header = `⚠️ Отклик НЕ отправлен: заказ только для Preferred Freelancer (recruiter-проект) — наш аккаунт не подходит`;
     } else {
       header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
     }

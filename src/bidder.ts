@@ -56,6 +56,11 @@ export async function placeBid(
   if (!bidText || bidText.trim() === "") {
     return { placed: false, reason: "empty-bid-text" };
   }
+  // Проекты с бейджем RECRUITER — только для Preferred Freelancer; наш аккаунт
+  // им не является, API отклонил бы ставку (403). Не тратим запрос.
+  if (order.upgrades.recruiter) {
+    return { placed: false, reason: "preferred-only" };
+  }
 
   // Pre-flight: свежий bid_count. Заказ с разогнавшейся конкуренцией — пропуск.
   try {
