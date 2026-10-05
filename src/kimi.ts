@@ -4,6 +4,7 @@ import {
   buildScoringSystemPrompt,
   SCORING_JSON_SCHEMA,
   BID_TEXT_SYSTEM_PROMPT,
+  BID_TEXT_MAX_CHARS,
   buildScoringUserMessage,
   type ScoringContext,
 } from "./prompts";
@@ -517,9 +518,48 @@ export function sanitizeBidText(text: string): string {
   return t.trim();
 }
 
+// Жёсткий кап длины текста ставки (платформа не даёт редактировать длиннее
+// 1500 символов). Обрезаем по границе предложения, не посередине слова.
+export function capBidText(text: string, max = BID_TEXT_MAX_CHARS): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastBoundary = Math.max(
+    cut.lastIndexOf(". "),
+    cut.lastIndexOf("! "),
+    cut.lastIndexOf("? "),
+    cut.lastIndexOf("\n"),
+  );
+  const keep = lastBoundary > max * 0.6 ? lastBoundary + 1 : cut.lastIndexOf(" ");
+  const candidate = (keep > max * 0.5 ? cut.slice(0, keep) : cut).trimEnd();
+  return candidate.replace(/[,;:\s-]+$/, "") + ".";
+}
+
 export async function generateBidText(
   env: Env,
   messages: { role: string; content: string }[]
 ): Promise<string> {
-  return sanitizeBidText(await chat(env, messages));
+  let text = sanitizeBidText(await chat(env, messages));
+  if (text.length > BID_TEXT_MAX_CHARS) {
+    // Одна попытка сжать осознанно; если снова перебор — жёсткая обрезка.
+    try {
+      const retry = await chat(env, [
+        ...messages,
+        { role: "assistant", content: text },
+        {
+          role: "user",
+          content: `HARD LIMIT exceeded: the bid text is ${text.length} characters, the platform maximum is ${BID_TEXT_MAX_CHARS}. Rewrite it COMPLETE in at most 1400 characters — keep the hook, the price and the milestone terms, cut examples and repetitions. Output only the bid text.`,
+        },
+      ]);
+      const shorter = sanitizeBidText(retry);
+      if (shorter.length <= BID_TEXT_MAX_CHARS) return shorter;
+    } catch (e) {
+      console.warn("generateBidText compression retry failed:", String(e));
+    }
+    console.warn("generateBidText: hard-capping bid text", {
+      before: text.length,
+      after: Math.min(text.length, BID_TEXT_MAX_CHARS),
+    });
+    text = capBidText(text);
+  }
+  return text;
 }

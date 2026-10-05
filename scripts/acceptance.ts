@@ -1,6 +1,6 @@
 // Виртуальная приёмка логики перед live-режимом.
 // Запуск: npm run acceptance
-import { normalizeScore, validateScore, sanitizeBidText } from "../src/kimi";
+import { normalizeScore, validateScore, sanitizeBidText, capBidText } from "../src/kimi";
 import { isAwarded } from "../src/milestones";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, CRYPTO_SKILL_ID } from "../src/enrich";
 import { preBidRejectReason } from "../src/service";
@@ -186,6 +186,17 @@ const cfg = { targetHourly: 20, bidMinScore: 30, weeklyLimitHours: 40 } as any;
   ok(!/\*\*|__|~~|`/.test(clean), "sanitize: no markdown");
   eq(clean.includes("->"), true, "sanitize: arrow -> ascii");
   eq(clean.includes('"q"'), true, "sanitize: quotes straightened");
+}
+
+// ---------- I2. capBidText: жёсткий кап 1500 символов ----------
+{
+  const short = "Hi - short bid.";
+  eq(capBidText(short), short, "cap: short text untouched");
+  const long = ("Sentence number %d with several words here. ").repeat(80);
+  const capped = capBidText(long);
+  ok(capped.length <= 1500, `cap: fits 1500 (got ${capped.length})`);
+  ok(/[.?!]$/.test(capped), "cap: ends at sentence boundary");
+  ok(!capped.endsWith(" ") && !/,;:-$/.test(capped), "cap: no dangling punctuation");
 }
 
 // ---------- J. isAwarded ----------

@@ -109,7 +109,9 @@ export const BID_TEXT_SYSTEM_PROMPT = `You are an expert at writing freelance pl
 
 ${RULES_BID_SKILL}
 
-Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. 120-250 words, aim for 150-200.`;
+Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. HARD LIMIT: at most 1500 characters total (the platform does not allow editing a bid longer than that after posting — verified 2026-10-05). Aim for 1200-1400 characters; if the material overflows, cut examples and repetitions, never the hook or the price. 120-250 words.`;
+
+export const BID_TEXT_MAX_CHARS = 1500;
 
 export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): string {
   const balance =
