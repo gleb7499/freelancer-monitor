@@ -119,9 +119,12 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(r.net_amount, 11250, "INR fee 10%");
   // rate = 96.15; net_usd = 11250/96.15 = 117.0; /24/20*100 = 24.4 -> 24
   eq(r.value_score, 24, "INR value_score USD recalc (low is expected)");
-  // bid_avg в USD: 100*96.15*0.65 = 6250 < низа вилки -> 6250 (снеп до 25).
+  // bid_avg в USD: 100×96.15×0.65 = 6250 < низа вилки → низ вилки.
   const r2 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 24, }), { ...o, bid_avg: 100 }, cfg);
-  eq(r2.bid_amount, 6250, "INR avg x 0.65 below bottom -> formula value snapped");
+  eq(r2.bid_amount, 12500, "INR avg x 0.65 below bottom -> bottom");
+  // bid_avg 260 USD: 260×96.15×0.65 = 16251 > низа → снеп (шаг 100) 16300.
+  const r3 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 24 }), { ...o, bid_avg: 260 }, cfg);
+  eq(r3.bid_amount, 16300, "INR avg x 0.65 above bottom -> formula snapped");
 }
 
 // ---------- C2. детерминированная формула цены (USD) ----------
@@ -129,16 +132,16 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   const o = makeOrder({ budget_min: 100, budget_max: 500, budget_min_original: 100, budget_max_original: 500 });
   // нет ставок → низ вилки.
   eq(normalizeScore(makeScore({ bid_amount: 999 }), o, cfg).bid_amount, 100, "price: no bids -> bottom");
-  // avg 400 x 0.65 = 260 > низа -> 100.
-  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 400 }, cfg).bid_amount, 100, "price: avg*0.65 above bottom -> bottom");
-  // avg 120 x 0.65 = 78 -> снеп до 80.
-  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 120 }, cfg).bid_amount, 80, "price: avg*0.65 below bottom -> 80");
+  // avg 400 x 0.65 = 260 > низа → 260.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 400 }, cfg).bid_amount, 260, "price: avg*0.65 above bottom -> 260");
+  // avg 120 x 0.65 = 78 < низа 100 → 100.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 120 }, cfg).bid_amount, 100, "price: avg*0.65 below bottom -> bottom 100");
   // hourly — та же формула; снеп сетки кратен 5.
   const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
   eq(normalizeScore(makeScore({ bid_amount: 99 }), oh, cfg).bid_amount, 15, "price hourly: no bids -> bottom");
-  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 15, "price hourly: avg*0.65=19.5 -> bottom 15");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 20, "price hourly: max(15, 19.5) -> snap 20");
   const oh2 = makeOrder({ type: "hourly", budget_min: 12, budget_max: 25, budget_min_original: 12, budget_max_original: 25 });
-  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 10, "price hourly: min(12, 13) -> snap 10");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 15, "price hourly: max(12, 13) -> snap 15");
 }
 
 // ---------- C3. план этапов ----------
@@ -148,11 +151,11 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
       budget_min: bottom, budget_max: 5000, budget_min_original: bottom, budget_max_original: 5000,
       bid_avg: bidAvg,
     }), cfg);
-  // bottom 100, avg 250 -> min(100, 162.5) = 100 -> net 90 < $200 -> [30, 70].
+  // bottom 100, avg 250 -> max(100, 162.5) = 162.5 -> снеп 165 -> net 148.5 < $200 -> [30, 70].
   eq(JSON.stringify(caseOf(100, 250).milestone_plan), JSON.stringify([30, 70]), "plan < $200 -> 30/70");
-  // bottom 300, avg 800 -> min(300, 520) = 300 -> net 270 -> [30, 30, 40].
+  // bottom 300, avg 800 -> max(300, 520) = 520 -> net 468 -> [30, 30, 40].
   eq(JSON.stringify(caseOf(300, 800).milestone_plan), JSON.stringify([30, 30, 40]), "plan $200-1000 -> 30/30/40");
-  // bottom 1200, avg 3000 -> min(1200, 1950) = 1200 -> net 1080 -> [30, 30, 30, 10].
+  // bottom 1200, avg 3000 -> max(1200, 1950) = 1950 -> net 1755 -> [30, 30, 30, 10].
   eq(JSON.stringify(caseOf(1200, 3000).milestone_plan), JSON.stringify([30, 30, 30, 10]), "plan > $1000 -> 4 stages");
   // hourly — без плана.
   const h = normalizeScore(makeScore({ bid_amount: 1 }), makeOrder({

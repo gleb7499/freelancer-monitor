@@ -251,17 +251,17 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   // bid_amount и net_amount — в родной валюте заказа; score считаем в USD-пересчёте.
   //
   // Цена — ДЕТЕРМИНИРОВАННАЯ формула стратегии первых отзывов (не предложение LLM):
-  // fixed и hourly: min(низ вилки; средняя конкурентная ставка × 0.65).
-  // bid_avg приходит в USD — пересчитываем в родную валюту тем же курсом из бюджета.
-  // Ставок ещё нет (bid_avg = null) — низ вилки. Пол «70% середины» удалён:
-  // платформа сама не даст ставку ниже низа вилки (проверено live 05.10.2026).
+  // fixed и hourly: max(низ вилки; средняя конкурентная ставка × 0.65) — низкая
+  // цена, но не ниже дна вилки (платформа ниже дна всё равно не примет, а битую
+  // ставку генерировать незачем). bid_avg приходит в USD — пересчитываем в родную
+  // валюту тем же курсом из бюджета. Ставок ещё нет (bid_avg = null) — низ вилки.
   let valueScore = 0;
   if (s.verdict === "BID" && bid > 0) {
     let target = bid;
     if (order.budget_min_original > 0) {
       if (order.bid_avg != null && order.bid_avg > 0) {
-        // bid_avg приходит в USD, rate = родная валюта за 1 USD → умножаем.
-        target = Math.min(order.budget_min_original, order.bid_avg * rate * 0.65);
+        // bid_avg в USD, rate = родная валюта за 1 USD → умножаем.
+        target = Math.max(order.budget_min_original, order.bid_avg * rate * 0.65);
       } else {
         target = order.budget_min_original;
       }
@@ -478,7 +478,7 @@ export function buildBidMessages(
       : "";
   const priceNote =
     `\nPricing context (code-set): the bid is ${score.bid_amount} ${order.currency_code}` +
-    ` — a deliberately low, review-farming price (min of the range bottom and 0.65x the` +
+    ` — a deliberately low, review-farming price (bottom of the range or 0.65x the` +
     ` average competitor bid). The bid text must NOT call this a "discount off my usual rate";` +
     ` explain it as: an experienced developer for whom this platform is new, pricing low to earn` +
     ` the first review here — with the usual standard of work.`;

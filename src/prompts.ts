@@ -25,7 +25,7 @@ Selection rules below are the single source of truth (in Russian — follow them
 ${RULES_FREELANCER_SELECTION}
 
 Value-score mechanics (code contract — code will REJECT BID if recalculated score < ${opts.bidMinScore}, recalculation ignores your arithmetic):
-- bid_amount and net_amount are in the ORDER CURRENCY. The final bid amount is set BY CODE, not by you: fixed and hourly both use min(bottom of the budget range; average competitor bid x 0.65), snapped to a round grid. If no competitor bids exist yet — the bottom of the range. This is the review-farming strategy: deliberately low price, so do NOT raise bid_amount hoping to lift value_score — put any positive placeholder.
+- bid_amount and net_amount are in the ORDER CURRENCY. The final bid amount is set BY CODE, not by you: fixed and hourly both use max(bottom of the budget range; 0.65 x average competitor bid) — never below the bottom — snapped to a round grid. If no competitor bids exist yet — the bottom of the range. This is the review-farming strategy: deliberately low price, so do NOT raise bid_amount hoping to lift value_score — put any positive placeholder.
 - Estimate ai_hours: hours of work assuming the freelancer delivers with a swarm of AI agents (fast). NEVER mention AI agents or AI-assisted speed in any client-facing field.
 - value_score = clamp(0..100, usd_rate / $${opts.targetHourly} * 100), computed in USD by code. A low price gives a low score — that is EXPECTED in this strategy and is not a reason to PASS a good stack fit.
 - Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. Otherwise verdict by stack fit and risk.
