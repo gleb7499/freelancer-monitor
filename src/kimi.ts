@@ -35,7 +35,9 @@ export async function chat(
     model: cfg.kimiModel,
     messages,
     temperature: 1,
-    reasoning_effort: "low",
+    // Качество важнее скорости: скоринг и тексты ставок идут на глубоком
+    // размышлении (решение Gleb'а, 05.10.2026).
+    reasoning_effort: "high",
   };
   if (opts?.jsonSchema) {
     body.response_format = { type: "json_schema", json_schema: opts.jsonSchema };
