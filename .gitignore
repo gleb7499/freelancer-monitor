@@ -11,3 +11,4 @@ tmp/
 .claude/
 .agents/
 skills-lock.json
+.playwright-mcp/
