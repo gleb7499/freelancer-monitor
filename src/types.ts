@@ -32,6 +32,10 @@ export interface Order {
   };
   prepaid_milestone: boolean;
   source?: "active";
+  // Распарсенные материалы заказа: вложения (текстовые) и страницы по ссылкам
+  // из описания (fetchOrderArtifacts). LLM обязана учитывать при скоринге и в
+  // тексте отклика. Бинарники (PDF/DOCX) — плейсхолдером без текста.
+  artifacts?: { name: string; source: "attachment" | "url"; text: string }[] | null;
 }
 
 export interface Hours {

@@ -468,13 +468,15 @@ export function buildBidMessages(
   let portfolioBlock = "";
   if (portfolio && portfolio.items.length > 0) {
     const lines = portfolio.items
-      .map((it) => `- ${it.title}${it.url ? ` (${it.url})` : ""}: ${it.description}`)
+      .map((it) => `- ${it.title}: ${it.description}`)
       .join("\n");
     portfolioBlock =
-      `\n\nPortfolio published on the platform profile — when the client asks for examples/links` +
-      ` or a piece is directly relevant, reference 1-2 items BY THEIR SPECIFIC PROJECT LINK` +
-      ` (never just the account/profile link); this is always stronger than emphasizing the new` +
-      ` account. Never invent portfolio links.\n${lines}`;
+      `\n\nPortfolio published on the platform profile (titles + descriptions below).` +
+      ` When the client asks for examples/links or a piece is directly relevant, reference` +
+      ` 1-2 items BY TITLE ONLY — never paste any URL in the bid text. Instead point to the` +
+      ` profile and mention that a live demo link sits at the end of that project's` +
+      ` description on the profile. This is always stronger than emphasizing the new account.` +
+      ` Never invent project names or links.\n${lines}`;
   }
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },

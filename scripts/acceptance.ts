@@ -2,7 +2,7 @@
 // Запуск: npm run acceptance
 import { normalizeScore, validateScore, sanitizeBidText } from "../src/kimi";
 import { isAwarded } from "../src/milestones";
-import { fetchProjectClient, fetchPortfolio, CRYPTO_SKILL_ID } from "../src/enrich";
+import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, CRYPTO_SKILL_ID } from "../src/enrich";
 import { preBidRejectReason } from "../src/service";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap } from "../src/upgrades";
@@ -335,6 +335,55 @@ async function testPortfolio() {
   );
 }
 
+// ---------- L3. fetchOrderArtifacts (mock fetch) ----------
+async function testArtifacts() {
+  const realFetch = globalThis.fetch;
+  const env = {} as any;
+  const html = "<html><head><style>body{}</style><script>var x=1;</script></head><body><h1>Spec v2</h1><p>Requirements: JWT auth, CRUD, Docker.</p></body></html>";
+  const order = makeOrder({
+    id: 777,
+    description: "Build per the spec at https://example.com/spec.html and the PDF brief.",
+  });
+
+  // Проект без вложений + одна html-ссылка + один PDF (бинарный плейсхолдер).
+  globalThis.fetch = (async (url: string) => {
+    if (url.includes("/projects/?projects[]")) {
+      return new Response(JSON.stringify({ status: "success", result: { projects: [{ id: 777, attachments: null, files: null, drive_files: null }] } }), { status: 200 });
+    }
+    if (url === "https://example.com/spec.html") {
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    if (url === "https://example.com/brief.pdf") {
+      return new Response(new Uint8Array([37, 80, 68, 70]), { status: 200, headers: { "content-type": "application/pdf" } });
+    }
+    return new Response("nf", { status: 404 });
+  }) as any;
+  const arts = await fetchOrderArtifacts(env, order);
+  ok(arts !== null, "artifacts: parsed set returned");
+  const urlArt = arts && arts.find((a) => a.source === "url");
+  ok(urlArt !== undefined && urlArt.text.includes("Spec v2") && !urlArt.text.includes("var x"), "artifacts: html stripped to text, scripts gone");
+
+  // Описание со ссылкой на PDF — бинарный плейсхолдер, текст не выдумываем.
+  const orderPdf = makeOrder({ id: 778, description: "See the brief https://example.com/brief.pdf for details." });
+  globalThis.fetch = (async (url: string) => {
+    if (url.includes("/projects/?projects[]")) {
+      return new Response(JSON.stringify({ status: "success", result: { projects: [{ id: 778 }] } }), { status: 200 });
+    }
+    if (url === "https://example.com/brief.pdf") {
+      return new Response(new Uint8Array([37, 80, 68, 70]), { status: 200, headers: { "content-type": "application/pdf" } });
+    }
+    return new Response("nf", { status: 404 });
+  }) as any;
+  const arts2 = await fetchOrderArtifacts(env, orderPdf);
+  ok(arts2 !== null && arts2.some((a) => a.text.includes("бинарный файл")), "artifacts: pdf placeholder, no invented text");
+
+  // Всё недоступно → null.
+  globalThis.fetch = (async () => new Response("nf", { status: 404 })) as any;
+  eq(await fetchOrderArtifacts(env, order), null, "artifacts: nothing fetched -> null");
+
+  globalThis.fetch = realFetch;
+}
+
 // ---------- M. карточки Telegram ----------
 function testCards() {
   const o = makeOrder({
@@ -363,6 +412,7 @@ function testCards() {
 (async () => {
   await testClient();
   await testPortfolio();
+  await testArtifacts();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

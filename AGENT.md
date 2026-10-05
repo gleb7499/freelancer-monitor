@@ -33,7 +33,7 @@ Pipeline per tick (every 10 s via DO alarm), all in `src/`:
 
 - `index.ts` — entry: scheduled tick + admin test endpoints under `/test/*` + Telegram webhook (`/tg-webhook/<ADMIN_TOKEN>`) with operator commands
 - `sources/freelancer-active.ts` — единственный канал: официальный публичный API `GET {FREELANCER_API_BASE}/projects/active/` (без auth, без кук). Параметры: 11 скиллов `jobs[]` (9,323,607,741,759,979,1002,1042,2370,2376,2703 — как у saved search «Main Search»), `project_types[]=fixed|hourly`, `languages[]=en`, `sort_field=submitdate`, limit 25, full_description. Курсор — KV `active:last_submit` (unix sec, только `submitdate > cursor`); bootstrap — now-300 c (последние 5 минут). Опрос каждый тик DO (10 с; throttle KV `active:last_fetch` защищает от повторов внутри тика). Записи нормализуются `normalizeProject` из parser.ts
-- `enrich.ts` — `fetchProjectsByIds` (проекты по id), `fetchProjectClient` (открытая точка `projects/seo` по seo_url: verification/рейтинг/открытые заказы заказчика + `skill_ids` проекта → `order.client` в JSON скорингу и в пре-гейт) и `fetchPortfolio` (портфолио профиля через Develop API, кэш KV `portfolio:cache` 6 ч; уходит в контекст генерации текста ставки). `CRYPTO_SKILL_ID = 2658`
+- `enrich.ts` — `fetchProjectsByIds` (проекты по id), `fetchProjectClient` (открытая точка `projects/seo` по seo_url: verification/рейтинг/открытые заказы заказчика + `skill_ids` проекта → `order.client`), `fetchOrderArtifacts` (вложения проекта через не-compact карточку + страницы по ссылкам из описания: скачивает, HTML чистит до текста, бинарники — плейсхолдер; лимиты 300 KB/файл, 2.5K символов/артефакт, 6K всего → `order.artifacts`), `fetchPortfolio` (портфолио профиля, кэш KV 6 ч). `CRYPTO_SKILL_ID = 2658`
 - `parser.ts` — только `normalizeProject` (Freelancer project → `Order`, бюджеты пересчитываются в USD через `currency.exchange_rate`; `owner_id` анонимно всегда null — поле удалено)
 - `service.ts` — D1 dedup (table `seen`: id/source/status/reason/ts, retention 30 days, daily cleanup), `markAlertSeen` — жёсткий гейт до LLM (возвращает `{kept, rejected: {order, reason}[]}`): bids > 10 (`rej:bids>10`) и мягкий пре-гейт физической возможности ставки `preBidRejectReason` — recruiter (`rej:recruiter`), `is_seller_kyc_required` (`rej:kyc-required`), крипто-скилл 2658 из ответа projects/seo (`rej:crypto-verified`). Требует enrich ДО вызова; `seenStats24h` для `/status`
 - `bids-balance.ts` — баланс bids. Основной источник: read-only `ajax-api/projects/getBidLimit.php` (веб-авторизация freelancer-auth-v2) — отдаёт `bidsRemaining`, `bidLimit`, `bidRefreshTime`; официальный API баланс не отдаёт. Fallback — леджер D1 (`bid_ledger`, миграция `0002_bid_ledger.sql`): реген 1 bid / 7.5 ч, кап 100. `balance === 0` в тике → idle (опрос и LLM остановлены), заказы не помечаются — курсор стоит, при восстановлении баланса выдача догоняется
@@ -170,10 +170,22 @@ Before enabling/enlarging `[triggers] crons`, run the tick test and confirm card
   по словам balance/deposit/funds/insufficient (реальный текст ещё не видели).
 - **Cryptocurrency-проекты требуют верификации аккаунта (Freelancer Verified)** — иначе
   POST bids → 403 `RESTRICTED_FROM_BIDDING_PREMIUM_VERIFIED_JOB` (проверено 04.10.2026).
-  Наш аккаунт не верифицирован → крипто-проекты в правилах отсечены на уровне скоринга.
-- **Recruiter-проекты (бейдж RECRUITER, `upgrades.recruiter=true`) — только для Preferred
-  Freelancer**; наш аккаунт не подходит. Код режет такие ставки до POST (reason `preferred-only`).
-  Оба ограничения нередко стоят на одном проекте одновременно.
+  Детектятся скиллом 2658 в ответе projects/seo → пре-гейт `rej:crypto-verified` до LLM.
+- **Recruiter/pf_only-проекты — только для Preferred Freelancer.** Флаги `upgrades.recruiter`
+  / `pf_only` в API анонимизированы (показывают null/false даже с Bearer на заведомо
+  закрытом проекте; сайт показывает предупреждения только залогиненным) — **пре-гейт
+  невозможен**, ловим на POST: 403 → reason с текстом ошибки. Оба ограничения нередко
+  стоят на одном проекте.
+- **Лимит текста ставки ~1500 символов** — сверху сайт не даёт редактировать, хотя API
+  принимает длиннее. Генератор обязан укладываться (см. правила отклика).
+- **Ранжирование откликов** (официальный гайд Freelancer, freelancer.cn/community):
+  ранг персонализирован под работодателя, вид фрилансера ≠ вид работодателя. Факторы:
+  отзывы (свежесть экспоненциальна, число, размер проектов нелинейно, вес ревьюера),
+  milestone-платежи (оборот + частота релизов), отзывчивость (accept rate, скорость
+  ответа, штрафы за спам/офсайт), профиль (экзамены, полнота). Ранняя ставка помогает,
+  но не компенсирует нулевую историю — новый аккаунт без отзывов тонет внизу по мере
+  набора откликов. Экзамены — самый дешёвый буст для нового аккаунта; sponsored-ставка
+  гарантированно в топе списка.
 - `projects/seo` `result.client`: `verification{payment_verified, deposit_made, email_verified,
   phone_verified, profile_complete}`, `rating{average, review_count}`, `registration_unixtime`,
   `address`; `other_employer_jobs` — примерный список открытых заказов клиента.

@@ -126,6 +126,168 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
   return info;
 }
 
+// ---------- Артефакты заказа: вложения + ссылки из описания ----------
+
+export interface OrderArtifact {
+  name: string;
+  source: "attachment" | "url";
+  text: string;
+}
+
+const ARTIFACT_MAX_BYTES = 300_000;
+const ARTIFACT_TEXT_MAX = 2500;
+const ARTIFACT_TOTAL_MAX = 6000;
+const URL_IN_TEXT = /https?:\/\/[^\s)<>"'\]]+/g;
+const BINARY_EXT = /\.(pdf|docx?|xlsx?|pptx?|zip|rar|png|jpe?g|gif|webp|svg|ico|css|js|mp[34]|mov|exe|dmg)(\?|#|$)/i;
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateArtifact(text: string): string {
+  if (text.length <= ARTIFACT_TEXT_MAX) return text;
+  return text.slice(0, ARTIFACT_TEXT_MAX).trimEnd() + "…";
+}
+
+async function fetchArtifactText(url: string, name: string): Promise<OrderArtifact | null> {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(12000),
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const type = (res.headers.get("content-type") ?? "").toLowerCase();
+    const looksBinary =
+      type.includes("pdf") ||
+      type.includes("word") ||
+      type.includes("zip") ||
+      type.includes("excel") ||
+      type.includes("presentation") ||
+      BINARY_EXT.test(url);
+    if (looksBinary) {
+      // Тело не читаем: плейсхолдер, чтобы LLM знала о существовании файла.
+      const size = Number(res.headers.get("content-length") ?? 0);
+      const sizePart = size > 0 ? `, ${Math.round(size / 1024)} KB` : "";
+      await res.body?.cancel().catch(() => undefined);
+      return { name, source: "attachment", text: `[${name}: бинарный файл (${type || "unknown"}${sizePart}) — содержимое не извлечено]` };
+    }
+    const len = Number(res.headers.get("content-length") ?? 0);
+    if (len > ARTIFACT_MAX_BYTES) {
+      await res.body?.cancel().catch(() => undefined);
+      return { name, source: "attachment", text: `[${name}: файл ${Math.round(len / 1024)} KB — слишком большой, не скачан]` };
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > ARTIFACT_MAX_BYTES) {
+      return { name, source: "attachment", text: `[${name}: файл >${Math.round(ARTIFACT_MAX_BYTES / 1024)} KB — не скачан]` };
+    }
+    // Текстовое содержимое: HTML чистим до текста, остальное — как есть.
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+    let text: string;
+    if (type.includes("html") || /^\s*</.test(raw.slice(0, 200))) {
+      text = htmlToText(raw);
+    } else {
+      text = raw;
+    }
+    text = text.replace(/[^\x09\x0A\x0D\x20-\x7EА-яёЁ]/g, " ").replace(/\s+/g, " ").trim();
+    if (text === "") return null;
+    return { name, source: "attachment", text: truncateArtifact(text) };
+  } catch {
+    return null;
+  }
+}
+
+// Собирает материалы заказа для LLM: приложенные файлы (через не-compact запрос
+// проекта) и страницы по ссылкам из описания. Любые ошибки → null/частичный
+// набор; ничего не бросает. Воркер без парсера PDF/DOCX — бинарники плейсхолдером.
+export async function fetchOrderArtifacts(env: Env, order: Order): Promise<OrderArtifact[] | null> {
+  void env;
+  const out: OrderArtifact[] = [];
+
+  // 1) Вложения: не-compact карточка проекта отдаёт attachments/files/drive_files.
+  const fileUrls: { url: string; name: string }[] = [];
+  try {
+    const res = await fetch(
+      `https://www.freelancer.com/api/projects/0.1/projects/?projects[]=${order.id}`,
+      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
+    );
+    if (res.ok) {
+      const data = (await res.json()) as {
+        status?: string;
+        result?: { projects?: Record<string, unknown>[] };
+      };
+      const p = data.result?.projects?.[0] as Record<string, unknown> | undefined;
+      const pools = [p?.attachments, p?.files, p?.drive_files];
+      for (const pool of pools) {
+        const arr = Array.isArray(pool) ? pool : [];
+        for (const f of arr) {
+          if (!f || typeof f !== "object") continue;
+          const rec = f as Record<string, unknown>;
+          const url =
+            (typeof rec.url === "string" && rec.url) ||
+            (typeof rec.download_url === "string" && rec.download_url) ||
+            (typeof rec.file_url === "string" && rec.file_url) ||
+            (typeof rec.file_id === "number" &&
+              `https://www.freelancer.com/api/files/0.1/files/${rec.file_id}/`) ||
+            null;
+          const name =
+            (typeof rec.filename === "string" && rec.filename) ||
+            (typeof rec.name === "string" && rec.name) ||
+            (typeof rec.title === "string" && rec.title) ||
+            "attachment";
+          if (url) fileUrls.push({ url, name });
+        }
+      }
+    }
+  } catch {
+    // карточка проекта недоступна — остаются только ссылки из описания
+  }
+  for (const f of fileUrls.slice(0, 5)) {
+    const art = await fetchArtifactText(f.url, f.name);
+    if (art) out.push(art);
+  }
+
+  // 2) Ссылки из описания (внешние страницы; картинки исключаем, бинарники —
+  // плейсхолдером, чтобы LLM знала об их существовании).
+  const links = (order.description.match(URL_IN_TEXT) ?? [])
+    .map((u) => u.replace(/[.,;:!?]+$/, ""))
+    .filter((u) => !/freelancer\.com\//i.test(u))
+    .filter((u) => !/\.(png|jpe?g|gif|webp|svg|ico)(\?|#|$)/i.test(u));
+  const seen = new Set<string>();
+  for (const link of links.slice(0, 5)) {
+    if (seen.has(link)) continue;
+    seen.add(link);
+    const art = await fetchArtifactText(link, link);
+    if (art) out.push({ ...art, source: "url" });
+  }
+
+  if (out.length === 0) return null;
+  // Общий бюджет символов: хвост обрезаем.
+  let total = 0;
+  const capped: OrderArtifact[] = [];
+  for (const a of out) {
+    if (total + a.text.length > ARTIFACT_TOTAL_MAX) {
+      const room = ARTIFACT_TOTAL_MAX - total;
+      if (room > 200) capped.push({ ...a, text: a.text.slice(0, room).trimEnd() + "…" });
+      break;
+    }
+    capped.push(a);
+    total += a.text.length;
+  }
+  return capped;
+}
+
 
 // Своя копия fetchProjectsByIds: источник истины здесь, parser.ts держит
 // только normalizeProject.

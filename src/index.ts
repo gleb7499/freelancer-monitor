@@ -1,6 +1,6 @@
 import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
-import { fetchProjectClient, fetchPortfolio } from "./enrich";
+import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts } from "./enrich";
 import { filterNew, markAlertSeen, seenStats24h } from "./service";
 import { fetchActiveOrders } from "./sources/freelancer-active";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
@@ -143,8 +143,7 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
       const { kept, rejected } = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length, rejected: rejected.length });
-      ordersToScore.push(...kept);
-      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
+      ordersToScore.push(...kept);      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
       if (mode === "test") {
         for (const { order, reason } of rejected) {
           const human =
@@ -171,6 +170,17 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     await finishTick(env, stats, startedAt);
     await flushLogBuffer(env);
     return stats;
+  }
+
+  // Артефакты заказа (вложения + страницы по ссылкам из описания) — только для
+  // заказов, дошедших до LLM: уходят в JSON скоринга и в контекст текста ставки.
+  for (const order of ordersToScore) {
+    try {
+      order.artifacts = await fetchOrderArtifacts(env, order);
+    } catch (e) {
+      order.artifacts = null;
+      console.warn("fetchOrderArtifacts failed:", { id: order.id, err: String(e) });
+    }
   }
 
   // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
