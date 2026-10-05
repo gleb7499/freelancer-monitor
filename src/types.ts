@@ -59,9 +59,13 @@ export interface ScoreResult {
   take_upgrades: UpgradeId[];
   value_score: number;
   ai_hours: number;
+  // План этапов (доли в процентах, первый всегда 30, сумма 100).
+  // Размер ставки: <$200 → [30,70]; $200–1000 → [30,30,40]; >$1000 → [30,30,30,10].
+  // Только для fixed; hourly → null. Код считает, LLM озвучивает в тексте.
+  milestone_plan: number[] | null;
 }
 
-export type UpgradeId = "sealed" | "highlight" | "sponsored";
+export type UpgradeId = "sealed" | "sponsored";
 
 // Информация о заказчике (enrich.fetchProjectClient). Источник — открытый
 // эндпоинт projects/0.1/projects/seo (проверено live 2026-10-04): verification,

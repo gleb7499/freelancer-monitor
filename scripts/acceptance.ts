@@ -80,7 +80,7 @@ function makeScore(partial: Record<string, unknown>) {
   };
 }
 
-const cfg = { targetHourly: 20, bidMinScore: 30, weeklyLimitHours: 40 } as any;
+const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
 
 // ---------- A. normalizeScore: округление сетки (без пола/капа: нулевой бюджет) ----------
 {
@@ -106,58 +106,74 @@ const cfg = { targetHourly: 20, bidMinScore: 30, weeklyLimitHours: 40 } as any;
   eq(r3.net_amount, 22.5, "fee hourly flat 10%, no min: 25 -> 22.5");
 }
 
-// ---------- C. валюта заказа (INR) ----------
+// ---------- C. валюта заказа (INR) + детерминированная цена ----------
 {
   const o = makeOrder({
     budget_min: 130, budget_max: 389,
     budget_min_original: 12500, budget_max_original: 37500,
     currency_code: "INR", currency_sign: "₹",
   });
+  // bid_avg = null → детерминированный низ вилки.
   const r = normalizeScore(makeScore({ bid_amount: 24000, ai_hours: 24 }), o, cfg);
-  eq(r.bid_amount, 24000, "INR bid stays round");
-  eq(r.net_amount, 21600, "INR fee 10%");
-  // rate = 12500/130 = 96.15; net_usd = 21600/96.15 = 224.65; /24/20*100 = 46.8 -> 47
-  eq(r.value_score, 47, "INR value_score USD recalc");
+  eq(r.bid_amount, 12500, "INR no bids -> bottom of range");
+  eq(r.net_amount, 11250, "INR fee 10%");
+  // rate = 96.15; net_usd = 11250/96.15 = 117.0; /24/20*100 = 24.4 -> 24
+  eq(r.value_score, 24, "INR value_score USD recalc (low is expected)");
+  // bid_avg в USD: 100*96.15*0.65 = 6250 < низа вилки -> 6250 (снеп до 25).
+  const r2 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 24, }), { ...o, bid_avg: 100 }, cfg);
+  eq(r2.bid_amount, 6250, "INR avg x 0.65 below bottom -> formula value snapped");
 }
 
-// ---------- D. пол и кап ----------
+// ---------- C2. детерминированная формула цены (USD) ----------
 {
-  const o = makeOrder({
-    budget_min: 130, budget_max: 389,
-    budget_min_original: 12500, budget_max_original: 37500,
-    currency_code: "INR", currency_sign: "₹",
-  });
-  const low = normalizeScore(makeScore({ bid_amount: 1000, ai_hours: 10 }), o, cfg);
-  eq(low.bid_amount, 17500, "floor 70% of mid: 1000 -> 17500");
-  const high = normalizeScore(makeScore({ bid_amount: 60000, ai_hours: 50 }), o, cfg);
-  eq(high.bid_amount, 56200, "cap 150% of max: 60000 -> 56200");
+  const o = makeOrder({ budget_min: 100, budget_max: 500, budget_min_original: 100, budget_max_original: 500 });
+  // нет ставок → низ вилки.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), o, cfg).bid_amount, 100, "price: no bids -> bottom");
+  // avg 400 x 0.65 = 260 > низа -> 100.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 400 }, cfg).bid_amount, 100, "price: avg*0.65 above bottom -> bottom");
+  // avg 120 x 0.65 = 78 -> снеп до 80.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 120 }, cfg).bid_amount, 80, "price: avg*0.65 below bottom -> 80");
+  // hourly — та же формула; снеп сетки кратен 5.
+  const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), oh, cfg).bid_amount, 15, "price hourly: no bids -> bottom");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 15, "price hourly: avg*0.65=19.5 -> bottom 15");
+  const oh2 = makeOrder({ type: "hourly", budget_min: 12, budget_max: 25, budget_min_original: 12, budget_max_original: 25 });
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 10, "price hourly: min(12, 13) -> snap 10");
+}
+
+// ---------- C3. план этапов ----------
+{
+  const caseOf = (bottom: number, bidAvg: number) =>
+    normalizeScore(makeScore({ bid_amount: 1, ai_hours: 10 }), makeOrder({
+      budget_min: bottom, budget_max: 5000, budget_min_original: bottom, budget_max_original: 5000,
+      bid_avg: bidAvg,
+    }), cfg);
+  // bottom 100, avg 250 -> min(100, 162.5) = 100 -> net 90 < $200 -> [30, 70].
+  eq(JSON.stringify(caseOf(100, 250).milestone_plan), JSON.stringify([30, 70]), "plan < $200 -> 30/70");
+  // bottom 300, avg 800 -> min(300, 520) = 300 -> net 270 -> [30, 30, 40].
+  eq(JSON.stringify(caseOf(300, 800).milestone_plan), JSON.stringify([30, 30, 40]), "plan $200-1000 -> 30/30/40");
+  // bottom 1200, avg 3000 -> min(1200, 1950) = 1200 -> net 1080 -> [30, 30, 30, 10].
+  eq(JSON.stringify(caseOf(1200, 3000).milestone_plan), JSON.stringify([30, 30, 30, 10]), "plan > $1000 -> 4 stages");
+  // hourly — без плана.
+  const h = normalizeScore(makeScore({ bid_amount: 1 }), makeOrder({
+    type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25,
+  }), cfg);
+  eq(h.milestone_plan, null, "plan hourly -> null");
 }
 
 // ---------- E. force-pass по score ----------
 {
-  const o = makeOrder({});
-  const r = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 40 }), o, cfg);
-  eq(r.verdict, "PASS", "score < 30 force-passed");
+  const o = makeOrder({ budget_min: 0, budget_max: 0, budget_min_original: 0, budget_max_original: 0 });
+  const r = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 100 }), o, cfg);
+  eq(r.verdict, "PASS", "score < BID_MIN_SCORE force-passed");
   eq(r.value_score, 0, "force-pass zeroes score");
-}
-
-// ---------- F. выбор соседней точки ради score ----------
-{
-  // fixed, range 100-500 USD; ai_hours такие, что 200 даёт score<30, а 210 >= 30.
-  // 200: net 180; hourly rate 180/26=6.92 -> 34.6 -> ок. Подберём ai_hours=35: 180/35/20*100=25.7 (<30);
-  // 210: net 189/35/20*100=27 (<30). Не подходит — возьмём targetHourly ниже? Нельзя. Используем больший диапазон:
-  // range 1000-5000, bid 1000, ai_hours 35: net 900/35/20*100=128 -> fine уже. Проще: hourly заказ.
-  const o = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
-  // 20: net 18/2.2ч/20*100=40.9; 10: net 9/2.2/20*100=20.5 (<30).
-  const r = normalizeScore(makeScore({ bid_amount: 12, ai_hours: 2.2 }), o, cfg);
-  ok(r.verdict === "BID" && r.value_score >= 30, `neighbor-up picks score>=30 (got ${r.value_score} bid ${r.bid_amount})`);
 }
 
 // ---------- G. rate fallback (budget_min = 0) ----------
 {
   const o = makeOrder({ budget_min: 0, budget_min_original: 0, budget_max: 0, budget_max_original: 0 });
   const r = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 5 }), o, cfg);
-  eq(r.verdict, "BID", "zero-budget fallback rate=1 no floor/cap");
+  eq(r.verdict, "BID", "zero-budget fallback rate=1");
   eq(r.value_score, Math.min(100, Math.round((180 / 5 / 20) * 100)), "zero-budget score as USD");
 }
 
@@ -210,7 +226,7 @@ const cfg = { targetHourly: 20, bidMinScore: 30, weeklyLimitHours: 40 } as any;
 
 // ---------- K. enforceUpgradeCap ----------
 {
-  const capped = enforceUpgradeCap(["sealed", "sponsored", "highlight"], 5000, 4500);
+  const capped = enforceUpgradeCap(["sealed", "sponsored"], 5000, 4500);
   eq(capped.kept.includes("sponsored"), false, "cap cuts sponsored first");
   eq(capped.kept.includes("sealed"), true, "cap keeps sealed");
 }
@@ -409,7 +425,7 @@ function testCards() {
   const longBid = ("Word ".repeat(1200)).trim();
   const card = formatOrderCard(o, score, longBid);
   ok(card.length <= 4096, `BID card fits 4096 (got ${card.length})`);
-  ok(card.includes("₹24000"), "card: native currency shown");
+  ok(card.includes("₹12500"), "card: native currency shown (bottom-of-range bid)");
   ok(card.includes("≈$"), "card: USD approx shown");
 
   const passCard = formatPassCard(o, { ...score, verdict: "PASS", reason: "Чужой стек", red_flags: ["флаг"] });

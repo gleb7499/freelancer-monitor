@@ -285,7 +285,10 @@ async function processOrder(
     } else if (bidResult.placed) {
       const upgradesPart =
         score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
-      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, апгрейды: ${upgradesPart}`;
+      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, план апгрейдов: ${upgradesPart}`;
+      if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
+        header += `\n⚠️ sealed НЕ куплен (покупка через API отклонена: ${bidResult.sealPurchase}) — купи вручную на сайте, если нужно`;
+      }
     } else if (bidResult.reason === "insufficient-balance") {
       header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
       await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");

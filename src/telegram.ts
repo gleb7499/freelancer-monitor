@@ -134,7 +134,7 @@ export function formatOrderCard(
     const approx = prices.some((p) => p.approx);
     const total = totalPrice(prices);
     parts.push(
-      `🎟 Апгрейды: ${prices.map((p) => p.label).join(", ")} (итого ${approx ? "~" : ""}$${total.toFixed(2)})`,
+      `🎟 План апгрейдов (цены оценочные, покупка отдельным шагом): ${prices.map((p) => p.label).join(", ")} (итого ${approx ? "~" : ""}$${total.toFixed(2)})`,
     );
     if (score.take_upgrades.includes("sponsored")) {
       parts.push(

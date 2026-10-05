@@ -36,9 +36,32 @@ export function isAwarded(bid: RawBid): boolean {
 const KV_LAST_CHECK = "ms:last_check";
 const THROTTLE_SEC = 300;
 const KV_REQ_PREFIX = "ms:req:";
-const KV_REQ_TTL = 30 * 86400;
-const SMALL_BID_USD = 100;
+const KV_REQ_TTL = 60 * 86400;
 const KICKOFF_RATIO = 0.3;
+
+// Статус последнего milestone-запроса по id (null — не найден/ошибка).
+async function fetchMilestoneRequestStatus(
+  cfg: { freelancerBase: string; flOauthToken: string; flApiKey: string },
+  authHeaders: Record<string, string>,
+  requestId: number | null,
+): Promise<string | null> {
+  if (requestId === null) return null;
+  try {
+    const res = await fetch(
+      `${cfg.freelancerBase}/milestone_requests/?milestone_requests[]=${requestId}`,
+      { headers: authHeaders, signal: AbortSignal.timeout(15000) },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      status?: string;
+      result?: { milestone_requests?: Record<string, { status?: unknown }> };
+    };
+    const mr = data.result?.milestone_requests?.[String(requestId)];
+    return typeof mr?.status === "string" ? mr.status : null;
+  } catch {
+    return null;
+  }
+}
 
 async function fetchMyBids(
   env: Env,
@@ -125,46 +148,68 @@ export async function checkMilestones(
       raw_status: bid.award_status ?? bid.frontend_bid_status,
     });
 
-    // Дедуп: запрос на эту ставку уже создавали.
+    // Состояние цепочки этапов: KV ms:req:<bid_id> = {next_index, plan, requested[]}.
+    // План приходит из bidder.ts (ms:plan:<bid_id>), fallback [30, 70].
     const dedupKey = `${KV_REQ_PREFIX}${bidId}`;
-    const existing = await env.ORDERS_KV.get(dedupKey);
-    if (existing !== null) {
-      result.skipped.push({ bid_id: bidId, reason: "already-requested" });
+    let state: { next_index: number; plan: number[]; requested: { amount: number; request_id: number | null }[] } | null = null;
+    try {
+      const raw = await env.ORDERS_KV.get(dedupKey);
+      if (raw !== null) state = JSON.parse(raw);
+    } catch {
+      state = null;
+    }
+    if (state === null) {
+      let plan = [30, 70];
+      try {
+        const planRaw = await env.ORDERS_KV.get(`ms:plan:${bidId}`);
+        if (planRaw !== null) {
+          const parsed = JSON.parse(planRaw) as { plan?: unknown };
+          if (Array.isArray(parsed.plan) && parsed.plan.length >= 2 && parsed.plan.length <= 4) {
+            plan = parsed.plan.map(Number);
+          }
+        }
+      } catch {
+        // fallback-план
+      }
+      state = { next_index: 0, plan, requested: [] };
+    }
+    if (state.next_index >= state.plan.length) {
+      result.skipped.push({ bid_id: bidId, reason: "plan-complete" });
       continue;
     }
 
-    // Малый заказ (в долларовом эквиваленте) этапить не надо. Ошибка fetch
-    // проекта не блокирует: консервативно считаем заказ крупным.
-    let order: Order | undefined;
-    try {
-      order = (await fetchProjectsByIds(env, [projectId]))[0];
-    } catch (e) {
-      console.warn("milestones.project-fetch-failed", { project_id: projectId, err: String(e) });
-    }
-    if (order) {
-      const rate =
-        order.budget_min > 0 && order.budget_min_original > 0
-          ? order.budget_min_original / order.budget_min
-          : 1;
-      const bidUsd = bidAmount / rate;
-      if (bidUsd < SMALL_BID_USD) {
-        result.skipped.push({ bid_id: bidId, reason: "small-bid" });
+    // Этап 2+ запрашиваем только когда предыдущий выпущен (Released).
+    if (state.next_index > 0) {
+      const last = state.requested[state.requested.length - 1];
+      const status = await fetchMilestoneRequestStatus(cfg, authHeaders, last?.request_id ?? null);
+      if (status === "pending" || status === "active" || status === "created" || status === "funded") {
+        result.skipped.push({ bid_id: bidId, reason: "awaiting-release" });
+        continue;
+      }
+      if (status !== "released" && status !== null) {
+        result.skipped.push({ bid_id: bidId, reason: `prev-${status}` });
         continue;
       }
     }
 
-    const amount = Math.round(bidAmount * KICKOFF_RATIO * 100) / 100;
+    const share = state.plan[state.next_index];
+    const amount = Math.round(bidAmount * (share / 100) * 100) / 100;
     if (!(amount > 0)) {
       result.skipped.push({ bid_id: bidId, reason: "zero-amount" });
       continue;
     }
+    const stageNo = state.next_index + 1;
+    const stageTotal = state.plan.length;
+    const description =
+      stageNo === 1
+        ? "Kickoff milestone - 30% upfront to start work; the remainder on delivery."
+        : `Milestone ${stageNo} of ${stageTotal} (${share}%).`;
 
     if (dryRun) {
       result.requested.push({ bid_id: bidId, project_id: projectId, amount });
       continue;
     }
 
-    const description = "Kickoff milestone - 30% upfront to start work; the remainder on delivery.";
     let res: Response;
     try {
       res = await fetch(`${cfg.freelancerBase}/milestone_requests/`, {
@@ -194,17 +239,26 @@ export async function checkMilestones(
       } catch {
         // id не критичен
       }
-      await env.ORDERS_KV.put(
-        dedupKey,
-        JSON.stringify({ request_id: requestId ?? null, amount, ts: Date.now() }),
-        { expirationTtl: KV_REQ_TTL },
-      );
+      state.requested.push({ amount, request_id: requestId ?? null });
+      state.next_index += 1;
+      try {
+        await env.ORDERS_KV.put(dedupKey, JSON.stringify(state), { expirationTtl: KV_REQ_TTL });
+      } catch {
+        // состояние не записалось — повторим на следующем тике (дедупа нет, риск
+        // двойного запроса приблизительно = нулю: клиенту нужно принять каждый)
+      }
       result.requested.push({ bid_id: bidId, project_id: projectId, amount, request_id: requestId });
+      let order: Order | undefined;
+      try {
+        order = (await fetchProjectsByIds(env, [projectId]))[0];
+      } catch {
+        order = undefined;
+      }
       const sign = order?.currency_sign ?? "$";
       const projectPart = order ? order.url : `project #${projectId}`;
       await sendTelegram(
         env,
-        `💰 Запрошен этап оплаты\n\nПроект: ${projectPart}\nЭтап: ${sign}${amount} (30% от ставки ${sign}${bidAmount})\nЗапрос #${requestId ?? "?"} — ждёт принятия работодателем.`,
+        `💰 Запрошен этап оплаты (${stageNo}/${stageTotal})\n\nПроект: ${projectPart}\nЭтап: ${sign}${amount} (${share}% от ставки ${sign}${bidAmount})\nЗапрос #${requestId ?? "?"} — ждёт принятия работодателем.`,
       );
       continue;
     }

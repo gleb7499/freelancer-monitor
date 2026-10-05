@@ -56,6 +56,10 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 - **Приоритет 2 — закрытые точки официального Develop API.** Авторизация работает заголовком `Authorization: Bearer <FL_API_KEY>` (и `Freelancer-OAuth-V1`; проверено 04.10.2026 на `/projects/0.1/bids/`). Ключ хранится в секретах (`FL_API_KEY`), не в коде и не в логах.
   - `projects/0.1/milestone_requests/` — запрос этапного платежа исполнителем: `POST {project_id, bid_id, amount, description}`; работодатель принимает → этап создан и профинансирован (проверено 04.10.2026, SDK: [create_milestone_request](https://github.com/freelancer/freelancer-sdk-python/blob/master/examples/create_milestone_request.py)).
   - `projects/0.1/milestones/` — создание (`POST {project_id, bidder_id, amount, reason, description}`), release (`PUT /milestones/{id}/` с `action=release` / `request_release`), отмена (`DELETE`).
+  - **`PUT /projects/0.1/bids/{bid_id}/` body JSON `{action}`** — действия над ставкой (проверено 05.10.2026). Действующий enum: `seal | sponsor | highlight | retract | revoke | accept | award`. **Покупка апгрейдов:**
+    - `action=seal` → 400 `USER_NOT_IN_PFP` («You are not in the Preferred Freelancer Program») — API-покупка sealed требует PFP, хотя веб-форма предлагает sealed за $0.10. Автопокупка реализована (`buyBidUpgrade`), но скорее всего будет отклоняться; карточка честно сообщает.
+    - `action=sponsor` требует `amount`; семантика суммы НЕ ясна (amount=2 → «Bid cannot be less than 600» — похоже на минимум $6 или минимум в единицах ставки). **Автопокупка sponsored не включена** — пока Gleb не проверит вручную на сайте, что реально списывается.
+    - Цены апгрейдов **динамические per project**: sealed стабильно $0.10; sponsored на ₹7000 (~$84) — $1.90, на $500 — $2.90 (официальные «0.75%, min $1.90/$5, max $20» недостоверны). Точная цена известна только форме ставки. Слот sponsored **один на проект, без аукциона** — кто купил первым, тот в топе, позиция не деградирует с ростом числа ставок.
 - **Приоритет 3 — закрытый приватный API freelancer.com** (внутренние точки веб-приложения) — только если данных нет в приоритетах 1–2.
 - Правило: секреты только через env/секреты wrangler; значения токенов в логи, отчёты и коммиты не выводить.
 
@@ -74,10 +78,12 @@ Webhook регистрируется один раз: `POST /test/set-webhook` (
 
 ## Post-scoring rules (deterministic, LLM does not decide these)
 
+- **Цена ставки — детерминированная формула** (fixed и hourly): `min(низ вилки; bid_avg × курс × 0.65)`, снеп круглой сетки; `bid_avg = null` → низ вилки. Предложение LLM по сумме игнорируется. Пол «70% середины» удалён (платформа сама не даёт ниже низа вилки). Низкий value_score — ожидаемое следствие низкой цены, не основание для PASS.
+- **BID_MIN_SCORE = 10** (`wrangler.toml`) — порог под стратегию первых отзывов.
 - **Weekly limit (hourly):** final `weekly_limit_hours = min(LLM value or DEFAULT_WEEKLY_LIMIT, DEFAULT_WEEKLY_LIMIT, 40)` (`clampWeeklyLimit`). LLM may lower it for a tight deadline, never raise it.
-- **Fee/net:** fixed — 10% with $5 minimum; hourly — flat 10%, no minimum.
-- **No budget floors.** Budget/rate thresholds were deliberately removed: static filters and post-scoring validation never reject by price (no `MIN_BUDGET_USD`/`MIN_FIXED_USD`/`MIN_HOURLY_USD`). Cheap orders (incl. low INR budgets) reach the LLM, which decides price fitness in the verdict.
-- **Value-score:** scoring выдаёт `value_score` (0–100) и `ai_hours`; карточка показывает `🎯 Value: N/100 (~$X/ч при Y AI-ч)`. Порог BID по value_score — `BID_MIN_SCORE` из `wrangler.toml`.
+- **Fee/net:** fixed — 10% с минимумом $5; hourly — плоско 10%, без минимума.
+- **No budget floors.** Бюджет/ставка НЕ фильтруются статически: дешёвые заказы доходят до LLM.
+- **Этапы (fixed):** всегда `milestone_percentage: 30` в ставке; план этапов `milestone_plan` (<$200 → 30/70; $200–1000 → 30/30/40; >$1000 → 30/30/30/10, кап 4) сохраняется в KV `ms:plan:<bid_id>`; milestones.ts запрашивает следующий этап, когда предыдущий Released. Релиз — только по факту готовности (ранний релиз + жалоба = штраф ранга).
 
 Note: platform-specific selection rules live in `rules/freelancer-*.md`. The pipeline is platform-shaped (parser per platform, shared dedup/scoring/card layers) — при появлении второй площадки её правила добавляются как отдельный файл rules/, без переломки общего конвейера.
 

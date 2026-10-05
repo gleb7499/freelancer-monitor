@@ -102,11 +102,6 @@ function roundBid(amount: number): number {
   return amount - base >= step / 2 ? base + step : base;
 }
 
-function roundBidUp(amount: number): number {
-  const step = gridStep(amount);
-  return Math.ceil(amount / step - 1e-9) * step;
-}
-
 function roundBidDown(amount: number): number {
   const step = gridStep(amount);
   return Math.floor(amount / step + 1e-9) * step;
@@ -224,7 +219,7 @@ export function validateScore(s: any, order: Order): string[] {
   ) {
     errors.push("ai_hours must be a positive number");
   }
-  const UPGRADE_IDS = ["sealed", "highlight", "sponsored"];
+  const UPGRADE_IDS = ["sealed", "sponsored"];
   if (!Array.isArray(s.take_upgrades)) {
     errors.push("take_upgrades must be an array");
   } else if (
@@ -253,18 +248,26 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   let fee = 0;
   let net = 0;
   // Кодовый пересчёт value_score — LLM-арифметике не доверяем.
-  // bid_amount и net_amount — в родной валюте заказа; score считаем в USD-пересчёте:
-  // net_usd = net / rate; rate_per_hour = net_usd / ai_hours; score = rate / targetHourly * 100.
+  // bid_amount и net_amount — в родной валюте заказа; score считаем в USD-пересчёте.
+  //
+  // Цена — ДЕТЕРМИНИРОВАННАЯ формула стратегии первых отзывов (не предложение LLM):
+  // fixed и hourly: min(низ вилки; средняя конкурентная ставка × 0.65).
+  // bid_avg приходит в USD — пересчитываем в родную валюту тем же курсом из бюджета.
+  // Ставок ещё нет (bid_avg = null) — низ вилки. Пол «70% середины» удалён:
+  // платформа сама не даст ставку ниже низа вилки (проверено live 05.10.2026).
   let valueScore = 0;
   if (s.verdict === "BID" && bid > 0) {
-    bid = roundBid(bid);
-    // Пол: не ниже 70% середины вилки в родной валюте.
-    let floor = 0;
-    if (order.budget_max_original > 0) {
-      floor = (0.7 * (order.budget_min_original + order.budget_max_original)) / 2;
-      if (bid < floor) bid = roundBidUp(floor);
+    let target = bid;
+    if (order.budget_min_original > 0) {
+      if (order.bid_avg != null && order.bid_avg > 0) {
+        // bid_avg приходит в USD, rate = родная валюта за 1 USD → умножаем.
+        target = Math.min(order.budget_min_original, order.bid_avg * rate * 0.65);
+      } else {
+        target = order.budget_min_original;
+      }
     }
-    // Sanity-кап: не выше 150% верха вилки.
+    bid = roundBid(target);
+    // Sanity-кап: не выше 150% верха вилки (страховка, в норме не срабатывает).
     if (order.budget_max_original > 0) {
       const cap = order.budget_max_original * 1.5;
       if (bid > cap) bid = roundBidDown(cap);
@@ -277,38 +280,25 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
         Math.round((toUsd(n, rate) / s.ai_hours / cfg.targetHourly) * 100)
       );
     };
-    const step = gridStep(bid);
-    const down = roundBidDown(bid);
-    const up = down + step;
-    // Соседние точки сетки в пределах floor/cap.
-    const candidates = [bid];
-    if (down !== bid && down >= floor && (order.budget_max_original <= 0 || down <= order.budget_max_original * 1.5)) {
-      candidates.push(down);
-    }
-    if (up !== bid && (order.budget_max_original <= 0 || up <= order.budget_max_original * 1.5)) {
-      candidates.push(up);
-    }
-    const bidScore = scoreFor(bid);
-    // Если ближайшая точка ниже порога, а соседняя (в пределах cap) — нет, берём соседнюю.
-    if (bidScore < cfg.bidMinScore) {
-      const better = candidates
-        .filter((c) => c !== bid)
-        .map((c) => ({ c, sc: scoreFor(c) }))
-        .filter((x) => x.sc >= cfg.bidMinScore)
-        .sort((a, b2) => b2.sc - a.sc)[0];
-      if (better) {
-        bid = better.c;
-        valueScore = better.sc;
-      } else {
-        valueScore = bidScore;
-      }
-    } else {
-      valueScore = bidScore;
-    }
+    // Соседняя точка ради score НЕ поднимает цену: цена — детерминированная
+    // формула стратегии отзывов; низкий score — ожидаемое следствие, порог
+    // решает force-pass ниже, а не подтягивание ставки.
+    valueScore = scoreFor(bid);
     fee = feeFor(order, bid, rate);
     net = Math.round((bid - fee) * 100) / 100;
     // score пересчитываем от финального net (совпадает с scoreFor(bid), но для ясности).
     valueScore = scoreFor(bid);
+  }
+  // План этапов для fixed — по итоговой ставке в USD-эквиваленте.
+  let milestonePlan: number[] | null = null;
+  if (s.verdict === "BID" && order.type === "fixed" && net > 0) {
+    const netUsd = net / rate;
+    milestonePlan =
+      netUsd > 1000
+        ? [30, 30, 30, 10]
+        : netUsd >= 200
+          ? [30, 30, 40]
+          : [30, 70];
   }
   let verdict: "BID" | "PASS" = s.verdict;
   if (verdict === "BID" && valueScore < cfg.bidMinScore) {
@@ -347,6 +337,7 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     take_upgrades: s.take_upgrades,
     value_score: valueScore,
     ai_hours: s.ai_hours,
+    milestone_plan: milestonePlan,
   };
 }
 
@@ -479,6 +470,18 @@ export function buildBidMessages(
       ` description on the profile. This is always stronger than emphasizing the new account.` +
       ` Never invent project names or links.\n${lines}`;
   }
+  const milestoneNote =
+    score.milestone_plan && score.milestone_plan.length > 0
+      ? `\nMilestone plan (code-set, fixed in stone): first milestone 30% of the bid upfront,` +
+        ` then ${score.milestone_plan.slice(1).join("% / ")}% on the following stages` +
+        ` (${score.milestone_plan.join("/")}). State these exact shares in the bid text as the payment structure.`
+      : "";
+  const priceNote =
+    `\nPricing context (code-set): the bid is ${score.bid_amount} ${order.currency_code}` +
+    ` — a deliberately low, review-farming price (min of the range bottom and 0.65x the` +
+    ` average competitor bid). The bid text must NOT call this a "discount off my usual rate";` +
+    ` explain it as: an experienced developer for whom this platform is new, pricing low to earn` +
+    ` the first review here — with the usual standard of work.`;
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
     {
@@ -490,6 +493,8 @@ export function buildBidMessages(
         JSON.stringify(score) +
         weeklyNote +
         portfolioBlock +
+        milestoneNote +
+        priceNote +
         "\n\nWrite the bid text now.",
     },
   ];

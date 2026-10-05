@@ -25,20 +25,20 @@ Selection rules below are the single source of truth (in Russian — follow them
 ${RULES_FREELANCER_SELECTION}
 
 Value-score mechanics (code contract — code will REJECT BID if recalculated score < ${opts.bidMinScore}, recalculation ignores your arithmetic):
-- bid_amount and net_amount are in the ORDER CURRENCY (currency_code; native budget range is budget_min_original/budget_max_original). Propose a ROUND amount.
+- bid_amount and net_amount are in the ORDER CURRENCY. The final bid amount is set BY CODE, not by you: fixed and hourly both use min(bottom of the budget range; average competitor bid x 0.65), snapped to a round grid. If no competitor bids exist yet — the bottom of the range. This is the review-farming strategy: deliberately low price, so do NOT raise bid_amount hoping to lift value_score — put any positive placeholder.
 - Estimate ai_hours: hours of work assuming the freelancer delivers with a swarm of AI agents (fast). NEVER mention AI agents or AI-assisted speed in any client-facing field.
-- rate = net / ai_hours is understood in USD: the code recalculates the exchange rate from the budget (budget_min_original / budget_min) and converts your native-currency amounts to USD.
-- value_score = clamp(0..100, usd_rate / $${opts.targetHourly} * 100). Report your estimate approximately; the code recomputes it exactly in USD.
-- Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. ${opts.bidMinScore}–60 → BID. > 60 → BID. In ALL cases the bid sits around the MIDDLE of the budget range — never the top.
-- Freshness reality: you see orders SECONDS after publication. bids = 0 means NOTHING — within minutes the order gets dozens of bids, most at or below mid-range. A top-of-range bid loses to those competitors by price; a mid-range bid with a strong text wins. Anchor for competitiveness right now: ~$10/h net.
-- Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, treat borderline value_score 60–75 as PASS.
+- value_score = clamp(0..100, usd_rate / $${opts.targetHourly} * 100), computed in USD by code. A low price gives a low score — that is EXPECTED in this strategy and is not a reason to PASS a good stack fit.
+- Thresholds: value_score < ${opts.bidMinScore} → verdict MUST be PASS. Otherwise verdict by stack fit and risk.
+- Freshness reality: you see orders SECONDS after publication; bids = 0 means nothing, dozens arrive within minutes. Being early helps weakly — rank is dominated by reviews, milestone history and profile, not chronology.
+- Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, be pickier: treat value_score < 20 as PASS.
 
 Scoring mechanics (code contract):
 - Weekly limit (hourly projects only): fill weekly_limit_hours — hours per week you can commit. Default ${opts.weeklyLimitHours} h/week. You MAY lower it for a tight deadline, you may NOT raise it above the default. For fixed projects use null.
-- Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes prices; you only pick the set. Thresholds for highlight/sponsored below are in USD equivalent — estimate it via the exchange rate from the budget.
-  - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed, buying is redundant).
-  - If bids <= 5 (we are in the first five bidders) — ONLY sealed is allowed. "highlight" and "sponsored" are FORBIDDEN.
-  - If 5 < bids <= 10 — at your discretion: "highlight" if net >= $100 equivalent; "sponsored" if net >= $200 equivalent AND (prepaid_milestone OR is_escrow_project OR upgrades.featured) AND estimated price <= $5 (price = 0.75% of your bid, min $1.90 — estimate it yourself).
+- Milestones: for fixed projects the code computes a milestone plan (milestone_plan field): always 30% upfront, then the rest split by project size — 30/70, 30/30/40, or 30/30/30/10 (up to 4 parts). Use it in the bid text when describing payment terms; hourly projects have no milestone plan.
+- Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes price estimates; you only pick the set.
+  - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed).
+  - If bids <= 5 (first five bidders) — ONLY sealed. "sponsored" is FORBIDDEN there.
+  - If 5 < bids <= 10 — "sponsored" at your discretion when ALL hold (USD equivalents, estimate via the budget exchange rate): fixed project, net >= $100, reliable client (deposit_made OR is_escrow_project OR prepaid_milestone OR client rating >= 4), estimated sponsored price (0.75% of the bid, min $1.90, max $19.99 — dynamic in reality) <= min($6, net x 0.03). The slot is ONE per project: whoever buys first takes it, there is no auction, the position does not degrade as bids accumulate.
 
 Language rules: fields reason, red_flags, check_manually, deadline_caveat, summary_ru are read by a Russian-speaking operator — write them IN RUSSIAN. verdict, bid_amount, net_amount, delivery_days, hours, value_score, ai_hours stay as before (values, not prose).
 
@@ -50,7 +50,7 @@ Client context: the order JSON may contain a "client" object (nullable) with fie
 For PASS verdicts set bid_amount=0, net_amount=0, delivery_days=0, value_score=0 (they are meaningless there); for BID they must be positive, bid_amount a round amount within the budget sanity range in the order currency.
 
 Output: exactly ONE JSON object, no text around it, matching this schema:
-{"verdict":"BID"|"PASS","reason":"one line in Russian","summary_ru":"2-3 sentences in Russian","hours":{"opt":number,"real":number,"pess":number},"red_flags":["string in Russian"],"check_manually":["string in Russian"],"bid_amount":number,"net_amount":number,"value_score":number,"ai_hours":number,"weekly_limit_hours":integer|null,"delivery_days":number,"deadline_caveat":"string in Russian"|null,"take_upgrades":["sealed"|"highlight"|"sponsored"]}`;
+{"verdict":"BID"|"PASS","reason":"one line in Russian","summary_ru":"2-3 sentences in Russian","hours":{"opt":number,"real":number,"pess":number},"red_flags":["string in Russian"],"check_manually":["string in Russian"],"bid_amount":number,"net_amount":number,"value_score":number,"ai_hours":number,"weekly_limit_hours":integer|null,"delivery_days":number,"deadline_caveat":"string in Russian"|null,"take_upgrades":["sealed"|"sponsored"]}`;
 }
 
 export const SCORING_JSON_SCHEMA = {
@@ -83,7 +83,7 @@ export const SCORING_JSON_SCHEMA = {
       deadline_caveat: { type: ["string", "null"] },
       take_upgrades: {
         type: "array",
-        items: { type: "string", enum: ["sealed", "highlight", "sponsored"] },
+        items: { type: "string", enum: ["sealed", "sponsored"] },
       },
     },
     required: [
