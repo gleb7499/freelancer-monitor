@@ -1,6 +1,6 @@
 # Freelancer API — справочник по проверенным фактам
 
-> Собрано из живых проб 04–05.10.2026. Всё ниже — проверено запросами, если не
+> Собрано из живых проб 04–07.10.2026. Всё ниже — проверено запросами, если не
 > сказано иное. «Не проверено» — значит источник официальная документация/SDK,
 > живой пробы не было. Источник истины по иерархии доступа — AGENT.md
 > (раздел «Иерархия API Freelancer»).
@@ -12,6 +12,7 @@
 | Открытые точки | Только `User-Agent` браузера (без UA часть CDN режет) | `projects/active`, `projects/?projects[]`, `projects/seo`, `users/{id}` (репутация) |
 | Develop API (закрытые точки) | `Authorization: Bearer <FL_API_KEY>` (тот же ключ работает и как `Freelancer-OAuth-V1`) | `bids` GET/POST, `PUT bids/{id}/`, `milestone_requests`, `milestones`, `portfolios` |
 | OAuth аккаунта | `Freelancer-OAuth-V1: <FL_OAUTH_TOKEN>` (предпочтителен, когда задан) | то же; в проде секрета нет, рабочая схема — Bearer-ключ |
+| Пользовательский OAuth1-токен | тот же заголовок `Freelancer-OAuth-V1: <user token>` | то же (проверено 07.10.2026, аккаунт gleb7499 / 94242579); анонимизацию флагов/owner_id НЕ снимает |
 | Веб-авторизация | заголовок `freelancer-auth-v2: <FL_USER_ID>;<FL_AUTH_HASH>` + `freelancer-app-name: main`, `freelancer-app-platform: web`; горячая замена через KV `fl:auth` (эндпоинт `/admin/fl-auth`) | `ajax-api/projects/getBidLimit.php` (баланс bids) |
 
 Секреты: `FL_API_KEY` — прод-секрет и `--var` для локального `wrangler dev`
@@ -35,12 +36,16 @@ time_free_bids_expire,…`.
 
 ### Анонимизация и ограничения (важно)
 
-- `owner_id` в любых проектных ответах анонимно **null**.
+- `owner_id` в любых проектных ответах анонимно **null** — и с пользовательским
+  OAuth1-токеном тоже (проверено 07.10.2026).
 - Флаги ограничений (`upgrades.recruiter`, `pf_only`, `qualified`) приходят
-  **заниженными** (`null`/`false`) даже с Bearer-ключом на заведомо закрытом
-  проекте. Сайт показывает предупреждения («Preferred Freelancer only»,
-  «Verified for Cryptocurrency») **только залогиненной сессии** — данных для
-  пре-гейта нет, ловим на POST.
+  **заниженными** (`null`/`false`) с Bearer-ключом И с OAuth-токеном аккаунта
+  на заведомо закрытом проекте. Сайт показывает предупреждения («Preferred
+  Freelancer only», «Verified for Cryptocurrency») **только залогиненной
+  веб-сессии** — данных для пре-гейта нет, ловим на POST.
+- Цены апгрейдов проекта через API не получить: `?upgrade_prices=true`
+  принимается без ошибки, но полей не добавляет; `projects/{id}/upgrades/` и
+  `projects/0.1/upgrade_prices/` → 404 (пробы 07.10.2026).
 - Крипто-проекты детектируются скиллом **2658 (Cryptocurrency)** из ответа
   `projects/seo` (в intake скиллов нет).
 
@@ -50,6 +55,10 @@ time_free_bids_expire,…`.
 `nda_details, requires_upfront_funding, qualifications, …`. `jobs` — null.
 
 ### `GET /api/projects/0.1/projects/seo?seo_url=<slug>&webapp=1&compact=true` (открытая)
+
+`seo_url` — полный slug с категорией: `mongodb/Urgent-Express-Web-App-Support`.
+Голый slug без категории → `GAF_EXCEPTION` «resource does not exist»
+(проверено 07.10.2026).
 
 Основной источник данных о заказчике. Ответ `result`:
 - `client`: `verification{payment_verified, deposit_made, email_verified,
@@ -96,6 +105,17 @@ bid_rank, new_bid_rank` (ранги для нас null — видимо, тол�
 Детект назначения исполнителем (эвристика, не подтверждена живым назначением):
 `time_awarded` — число, либо строка `award_status`/`frontend_bid_status` со
 «award»/«accept». Сырые значения логируются (`milestones.awarded-bid`).
+
+### `GET /api/projects/0.1/bids/?projects[]=<id>` (закрытая) — ставки конкурентов
+
+Работает с Bearer и с пользовательским OAuth (проверено 07.10.2026).
+Выдаёт до ~100 ставок проекта с полями `bidder_id, amount, sealed, sponsored,
+highlighted, time_submitted` — флаги ПОКУПОК видны, в отличие от флагов
+ограничений проекта. Применение: проверка, свободен ли слот sponsored
+(слот один на проект), разведка конкуренции (доля sealed, медиана ставок).
+Живые наблюдения 07.10.2026: на проекте с 137 ставками sealed купили 30,
+sponsored/highlighted — 0; `bid_count` в `bid_stats` актуальнее карточек
+монитора (они снимаются на момент intake).
 
 ### `PUT /api/projects/0.1/bids/{bid_id}/` (закрытая) — действия над ставкой
 
@@ -163,6 +183,13 @@ milestone-систему**. Ограничения «заказ дешевле X
 bidRefreshTime (сек до регена)}`. Официальный API баланс не отдаёт
 (проверено: users/self и SDK). Fallback — леджер D1 (`bid_ledger`).
 
+`GET /api/users/0.1/self/` с OAuth: поля `preferred_freelancer,
+account_balances, membership_package, badges` есть в схеме ответа, но приходят
+`null` при любых параметрах (`full`/`webapp`/`membership&balances`) — PFP-статус
+и баланс через OAuth1 не читаются, только веб-сессия (`freelancer-auth-v2`).
+Практический детект PFP: попытка `action=seal` → `USER_NOT_IN_PFP`
+(проверено 07.10.2026).
+
 ## Апгрейды ставок
 
 | Апгрейд | Цена | Механика |
@@ -181,6 +208,10 @@ bidRefreshTime (сек до регена)}`. Официальный API бала
   и веб-согласия с условиями (покрытие согласия на будущие API-ставки —
   эксперимент Gleb'а, не завершён).
 - Комиссия: fixed 10% (мин. $5), hourly 10%.
+- Скорость рынка: дешёвый срочный заказ (€8–30) собрал 38 ставок и закрылся
+  с назначением исполнителя за ~40 минут (07.10.2026). `bids` в карточках
+  монитора — срез на момент intake и устаревает быстро; pre-flight
+  `bids > 10` перед POST ставки критичен.
 - Ранжирование откликов (официальный гайд): ранг персонализирован под
   работодателя (вид фрилансера ≠ вид работодателя); факторы — отзывы
   (свежесть экспоненциальна, число, размер проектов нелинейно), milestone-
@@ -190,7 +221,9 @@ bidRefreshTime (сек до регена)}`. Официальный API бала
 
 ## Неизведанное (следующие шаги при необходимости)
 
-- Семантика `amount` в `action=sponsor` (ручной тест на сайте).
+- Семантика `amount` в `action=sponsor` (ручной тест на сайте; цену слота
+  сайт считает динамически и через API не отдаёт — см. раздел «Апгрейды ставок»).
+- PFP-статус аккаунта для чтения (не для детекта ошибкой) — только веб-сессия.
 - Покрытие Escrow.com-согласия на будущие проекты.
 - Подтверждение детекта назначения ставки по живому случаю.
 - `POST /milestones/` и release-действия живьём.
