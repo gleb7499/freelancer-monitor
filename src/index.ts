@@ -270,7 +270,7 @@ async function processOrder(
         console.warn("fetchPortfolio failed:", String(e));
         return null;
       });
-      bidText = await generateBidText(env, buildBidMessages(order, score, portfolio));
+      bidText = await generateBidText(env, order, buildBidMessages(order, score, portfolio));
     } catch (e) {
       console.error("generateBidText failed:", e);
     }
@@ -422,7 +422,7 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
     if (score.verdict === "BID") {
       try {
         const portfolio = await fetchPortfolio(env).catch(() => null);
-        bidText = await generateBidText(env, buildBidMessages(order, score, portfolio));
+        bidText = await generateBidText(env, order, buildBidMessages(order, score, portfolio));
       } catch (e) {
         bidText = null;
         console.error("generateBidText failed:", e);
@@ -605,7 +605,7 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
 // DO однопоточный: тики не перекрываются, следующий аларм ставится
 // по завершении предыдущего. Cron (1/мин) — сторож: будит DO, если цепочка
 // прервалась (деплой, ошибка инфраструктуры).
-const TICK_INTERVAL_MS = 10_000;
+const TICK_INTERVAL_MS = 30_000;
 
 export class TickScheduler {
   constructor(

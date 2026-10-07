@@ -4,6 +4,7 @@ import { normalizeScore, validateScore, sanitizeBidText, capBidText } from "../s
 import { isAwarded } from "../src/milestones";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, CRYPTO_SKILL_ID } from "../src/enrich";
 import { preBidRejectReason } from "../src/service";
+import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap } from "../src/upgrades";
 import type { Order } from "../src/types";
@@ -431,6 +432,58 @@ async function testArtifacts() {
   globalThis.fetch = realFetch;
 }
 
+// ---------- M2. order-context (mock KV по образцу testPortfolio) ----------
+async function testOrderContext() {
+  const store = new Map<string, string>();
+  const env = {
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+    },
+  } as any;
+  const o = makeOrder({ id: 555 });
+  const score = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 5 }), o, cfg);
+  const draft = [{ role: "system", content: "s" }, { role: "user", content: "u" }];
+
+  // 1) update -> load: поля совпадают, createdTs/updatedTs проставлены
+  await updateOrderContext(env, o.id, { order: o, score, draftMessages: draft, humanizeMessages: [], bidText: null });
+  const c1 = await loadOrderContext(env, o.id);
+  ok(c1 !== null, "ctx: created record loaded");
+  eq(c1 && c1.order.id, 555, "ctx: order kept");
+  eq(c1 && c1.score.bid_amount, score.bid_amount, "ctx: score kept");
+  eq(c1 && c1.draftMessages, draft, "ctx: draftMessages kept");
+  ok(c1 !== null && c1.createdTs > 0 && c1.updatedTs > 0, "ctx: timestamps set");
+  ok(store.has("ctx:order:555"), "ctx: key format ctx:order:<id>");
+
+  // 2) второй update с патчем { bidText }: merge, createdTs не изменился
+  const createdTs = c1!.createdTs;
+  await new Promise((r) => setTimeout(r, 5));
+  await updateOrderContext(env, o.id, { bidText: "Hello bid." });
+  const c2 = await loadOrderContext(env, o.id);
+  eq(c2 && c2.bidText, "Hello bid.", "ctx: bidText patched");
+  eq(c2 && c2.order.id, 555, "ctx: merge kept old fields");
+  eq(c2 && c2.createdTs, createdTs, "ctx: createdTs unchanged");
+  ok(c2 !== null && c2.updatedTs >= createdTs, "ctx: updatedTs bumped");
+
+  // 3) битый JSON -> null
+  store.set("ctx:order:555", "{not json");
+  eq(await loadOrderContext(env, 555), null, "ctx: broken JSON -> null");
+
+  // 4) put бросает -> update не падает
+  const badEnv = {
+    ORDERS_KV: {
+      get: async () => null,
+      put: async () => { throw new Error("kv down"); },
+    },
+  } as any;
+  try {
+    await updateOrderContext(badEnv, 1, { order: o, score });
+    ok(true, "ctx: failing put does not throw");
+  } catch (e) {
+    ok(false, `ctx: failing put does not throw (threw ${String(e)})`);
+  }
+}
+
 // ---------- M. карточки Telegram ----------
 function testCards() {
   const o = makeOrder({
@@ -460,6 +513,7 @@ function testCards() {
   await testClient();
   await testPortfolio();
   await testArtifacts();
+  await testOrderContext();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

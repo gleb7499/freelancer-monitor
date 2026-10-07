@@ -10,6 +10,7 @@ import {
   type ScoringContext,
 } from "./prompts";
 import { getBidsBalance } from "./bids-balance";
+import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
 
 export class KimiError extends Error {
   status?: number;
@@ -416,7 +417,9 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
   }
   let errors = parsed === undefined ? ["response is not valid JSON"] : validateScore(parsed, order);
   if (errors.length === 0) {
-    return normalizeScore(parsed, order, cfg);
+    const result = normalizeScore(parsed, order, cfg);
+    await updateOrderContext(env, order.id, { order, score: result });
+    return result;
   }
   console.error("scoreOrder first-pass validation failed", {
     id: order.id,
@@ -467,7 +470,9 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     });
     return null;
   }
-  return normalizeScore(parsed, order, cfg);
+  const result = normalizeScore(parsed, order, cfg);
+  await updateOrderContext(env, order.id, { order, score: result });
+  return result;
 }
 
 export function buildBidMessages(
@@ -570,17 +575,34 @@ export function capBidText(text: string, max = BID_TEXT_MAX_CHARS): string {
 
 export async function generateBidText(
   env: Env,
+  order: Order,
   messages: { role: string; content: string }[]
 ): Promise<string> {
+  let ctx: OrderContext | null = null;
+  try {
+    ctx = await loadOrderContext(env, order.id);
+  } catch (e) {
+    console.warn("generateBidText: loadOrderContext failed", String(e));
+  }
   let text = sanitizeBidText(await chat(env, messages));
   // Второй проход: humanize-редактура по rules/humanize.md. Сбой не фатален —
   // отправляем черновик первого прохода без редактуры. Весь диалог humanize
   // сохраняется: повторные прогоны ужимки идут в ТОМ ЖЕ контексте — кэш-попадание,
-  // новые токены почти не жгутся.
-  const conv: { role: string; content: string }[] = [
-    { role: "system", content: HUMANIZE_SYSTEM_PROMPT },
-    { role: "user", content: text },
-  ];
+  // новые токены почти не жгутся. Контекст дополнительно персистится в KV
+  // (почва под авто-инициализацию GitHub-репозитория): если humanizeMessages уже
+  // есть — продолжаем их, иначе создаём новый диалог.
+  const conv: { role: string; content: string }[] =
+    ctx?.humanizeMessages?.length
+      ? ctx.humanizeMessages
+      : [
+          { role: "system", content: HUMANIZE_SYSTEM_PROMPT },
+          { role: "user", content: text },
+        ];
+  try {
+    await updateOrderContext(env, order.id, { order, draftMessages: messages, humanizeMessages: conv, bidText: text });
+  } catch (e) {
+    console.warn("generateBidText: save draft failed:", String(e));
+  }
   try {
     const humanized = sanitizeBidText(await chat(env, conv));
     if (humanized.length > 0) {
@@ -592,6 +614,11 @@ export async function generateBidText(
     console.warn("generateBidText: humanize pass failed, keeping draft:", String(e));
   }
   conv.push({ role: "assistant", content: text });
+  try {
+    await updateOrderContext(env, order.id, { order, draftMessages: messages, humanizeMessages: conv, bidText: text });
+  } catch (e) {
+    console.warn("generateBidText: save humanize failed:", String(e));
+  }
   // Модель нарушила жёсткий лимит — прогоняем до 2 раз с указанием на нарушение.
   for (let attempt = 0; text.length > BID_TEXT_MAX_CHARS && attempt < 2; attempt++) {
     conv.push({
@@ -608,6 +635,11 @@ export async function generateBidText(
       if (shorter.length === 0) break;
       text = shorter;
       conv.push({ role: "assistant", content: text });
+      try {
+        await updateOrderContext(env, order.id, { order, draftMessages: messages, humanizeMessages: conv, bidText: text });
+      } catch (e) {
+        console.warn("generateBidText: save compression failed:", String(e));
+      }
     } catch (e) {
       console.warn("generateBidText: compression attempt failed:", String(e));
       break;
@@ -620,6 +652,11 @@ export async function generateBidText(
       after: Math.min(text.length, BID_TEXT_MAX_CHARS),
     });
     text = capBidText(text);
+  }
+  try {
+    await updateOrderContext(env, order.id, { order, draftMessages: messages, humanizeMessages: conv, bidText: text });
+  } catch (e) {
+    console.warn("generateBidText: save final failed:", String(e));
   }
   return text;
 }
