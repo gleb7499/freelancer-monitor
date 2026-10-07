@@ -109,13 +109,13 @@ export const BID_TEXT_SYSTEM_PROMPT = `You are an expert at writing freelance pl
 
 ${RULES_BID_SKILL}
 
-Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. HARD LIMIT: at most 1500 characters total (the platform does not allow editing a bid longer than that after posting — verified 2026-10-05). Aim for 1200-1400 characters; if the material overflows, cut examples and repetitions, never the hook or the price. 120-250 words.`;
+Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. HARD LIMIT: at most 1500 characters total (the platform does not allow editing a bid longer than that after posting — verified 2026-10-05). HARD LIMIT: 1500 CHARACTERS MAXIMUM, SPACES AND LINE BREAKS INCLUDED — THIS IS NON-NEGOTIABLE. Aim for 1200-1400 characters; if the material overflows, cut examples and repetitions, never the hook or the price. Do not stop until the text fits the limit. 120-250 words.`;
 
 export const BID_TEXT_MAX_CHARS = 1500;
 
 // Второй проход редактуры: humanize-промт из rules/humanize.md (приоритетные
 // правила проекта в его конце). Ошибка этого вызова не фатальна — берём черновик.
-export const HUMANIZE_SYSTEM_PROMPT = `You are the second-pass editor for a freelance bid draft. Rewrite the draft per the editor rules below — project rules at the end outrank everything else. Return ONLY the rewritten bid text: plain text, ASCII only, no Markdown, no semicolons, 1200-1400 characters max.
+export const HUMANIZE_SYSTEM_PROMPT = `You are the second-pass editor for a freelance bid draft. Rewrite the draft per the editor rules below — project rules at the end outrank everything else. Return ONLY the rewritten bid text: plain text, ASCII only, no Markdown, no semicolons, 1200-1400 characters target. HARD LIMIT: 1500 CHARACTERS MAXIMUM, SPACES AND LINE BREAKS INCLUDED — NEVER return text above the limit; if the draft exceeds it, shorten the draft as part of your rewrite. Do not stop until the result fits the limit.
 
 ${RULES_HUMANIZE}`;
 

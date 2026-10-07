@@ -574,14 +574,15 @@ export async function generateBidText(
 ): Promise<string> {
   let text = sanitizeBidText(await chat(env, messages));
   // Второй проход: humanize-редактура по rules/humanize.md. Сбой не фатален —
-  // отправляем черновик первого прохода без редактуры.
+  // отправляем черновик первого прохода без редактуры. Весь диалог humanize
+  // сохраняется: повторные прогоны ужимки идут в ТОМ ЖЕ контексте — кэш-попадание,
+  // новые токены почти не жгутся.
+  const conv: { role: string; content: string }[] = [
+    { role: "system", content: HUMANIZE_SYSTEM_PROMPT },
+    { role: "user", content: text },
+  ];
   try {
-    const humanized = sanitizeBidText(
-      await chat(env, [
-        { role: "system", content: HUMANIZE_SYSTEM_PROMPT },
-        { role: "user", content: text },
-      ])
-    );
+    const humanized = sanitizeBidText(await chat(env, conv));
     if (humanized.length > 0) {
       text = humanized;
     } else {
@@ -590,22 +591,30 @@ export async function generateBidText(
   } catch (e) {
     console.warn("generateBidText: humanize pass failed, keeping draft:", String(e));
   }
-  if (text.length > BID_TEXT_MAX_CHARS) {
-    // Одна попытка сжать осознанно; если снова перебор — жёсткая обрезка.
+  conv.push({ role: "assistant", content: text });
+  // Модель нарушила жёсткий лимит — прогоняем до 2 раз с указанием на нарушение.
+  for (let attempt = 0; text.length > BID_TEXT_MAX_CHARS && attempt < 2; attempt++) {
+    conv.push({
+      role: "user",
+      content:
+        `You violated the HARD LIMIT: your bid text is ${text.length} characters, ` +
+        `the maximum is ${BID_TEXT_MAX_CHARS} — and you were explicitly forbidden ` +
+        `from exceeding it. Rewrite the COMPLETE bid text so it is at most 1400 ` +
+        `characters. Cut examples and repetitions, never the hook, the price or ` +
+        `the closing next step. Output only the bid text, no explanations.`,
+    });
     try {
-      const retry = await chat(env, [
-        ...messages,
-        { role: "assistant", content: text },
-        {
-          role: "user",
-          content: `HARD LIMIT exceeded: the bid text is ${text.length} characters, the platform maximum is ${BID_TEXT_MAX_CHARS}. Rewrite it COMPLETE in at most 1400 characters — keep the hook, the price and the milestone terms, cut examples and repetitions. Output only the bid text.`,
-        },
-      ]);
-      const shorter = sanitizeBidText(retry);
-      if (shorter.length <= BID_TEXT_MAX_CHARS) return shorter;
+      const shorter = sanitizeBidText(await chat(env, conv));
+      if (shorter.length === 0) break;
+      text = shorter;
+      conv.push({ role: "assistant", content: text });
     } catch (e) {
-      console.warn("generateBidText compression retry failed:", String(e));
+      console.warn("generateBidText: compression attempt failed:", String(e));
+      break;
     }
+  }
+  if (text.length > BID_TEXT_MAX_CHARS) {
+    // Фолбэк: две попытки не помогли — обрезаем последний ответ.
     console.warn("generateBidText: hard-capping bid text", {
       before: text.length,
       after: Math.min(text.length, BID_TEXT_MAX_CHARS),
