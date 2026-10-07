@@ -7,6 +7,7 @@ import { preBidRejectReason } from "../src/service";
 import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap } from "../src/upgrades";
+import { runWithConcurrency } from "../src/index";
 import type { Order } from "../src/types";
 
 let pass = 0;
@@ -508,12 +509,56 @@ function testCards() {
   ok(passCard.includes("PASS"), "PASS card: verdict present");
 }
 
+// ---------- P. пул параллелизма тика (мок: без сети) ----------
+async function testConcurrencyPool() {
+  const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let active = 0;
+  let maxActive = 0;
+  const tasks = Array.from({ length: 12 }, (_, i) => i);
+  // Батч из 12 "заказов" при лимите 5: параллелизм реален, но не выше лимита.
+  const out = await runWithConcurrency(tasks, 5, async (i) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await delay(15);
+    active -= 1;
+    return i * 2;
+  });
+  eq(maxActive, 5, "pool: параллелизм доходит до лимита 5");
+  eq(out.length, 12, "pool: все задачи обработаны");
+  eq(JSON.stringify(out), JSON.stringify(tasks.map((i) => i * 2)), "pool: порядок результатов сохранён");
+
+  // Лимит 1 — строго последовательно.
+  let seq = 0;
+  let maxSeq = 0;
+  await runWithConcurrency([1, 2, 3], 1, async () => {
+    seq += 1;
+    maxSeq = Math.max(maxSeq, seq);
+    await delay(5);
+    seq -= 1;
+  });
+  eq(maxSeq, 1, "pool: при лимите 1 — последовательно");
+
+  // Лимит больше числа задач — пул не плодит лишние воркеры, пустой батч — no-op.
+  let peak = 0;
+  let a2 = 0;
+  await runWithConcurrency([7, 8], 5, async () => {
+    a2 += 1;
+    peak = Math.max(peak, a2);
+    await delay(5);
+    a2 -= 1;
+  });
+  eq(peak, 2, "pool: воркеров не больше числа задач");
+  const empty = await runWithConcurrency([], 5, async () => 1);
+  eq(empty.length, 0, "pool: пустой батч — пустой результат");
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
   await testPortfolio();
   await testArtifacts();
   await testOrderContext();
+  await testConcurrencyPool();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

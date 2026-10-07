@@ -185,10 +185,11 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
 
   // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
   // циклом score → bidText → placeBid → карточка. Пул лимитирует одновременные
-  // LLM-вызовы (3) чтобы не провоцировать Kimi 429.
+  // LLM-вызовы (LLM_CONCURRENCY), чтобы не провоцировать Kimi 429; переполнение
+  // смягчают ретраи в chatWithRetries (5с/15с).
   const bidCtx: { reserved: number } = { reserved: 0 };
 
-  const results = await runWithConcurrency(ordersToScore, 3, async (order) => {
+  const results = await runWithConcurrency(ordersToScore, LLM_CONCURRENCY, async (order) => {
     const outcome = await processOrder(env, order, cfg, mode, bidsBalance, bidCtx);
     if (outcome === "pass") stats.llmPass += 1;
     else if (outcome === "bid") stats.bidCards += 1;
@@ -322,7 +323,12 @@ async function processOrder(
   }
 }
 
-async function runWithConcurrency<T, R>(
+// Пул одновременных LLM-вызовов на тик: при всплеске заказов батч обрабатывается
+// параллельно, но не выше этого потолка (Kimi 429). Тик при этом не перекрывается
+// со следующим: DO однопоточный, длинный батч просто отодвигает следующий тик.
+const LLM_CONCURRENCY = 5;
+
+export async function runWithConcurrency<T, R>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<R>,
