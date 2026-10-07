@@ -49,6 +49,9 @@ Non-secret tunables live in `wrangler.toml` `[vars]` (model, API bases, threshol
 
 ## Иерархия API Freelancer
 
+> Полный справочник проверенных фактов (эндпоинты, поля, ошибки, квирки) —
+> [docs/freelancer-api.md](docs/freelancer-api.md). Дальше — только иерархия.
+
 - **Приоритет 1 — открытые (публичные, без авторизации) точки API** (достаточно User-Agent обычного браузера):
   - `projects/0.1/projects/active` — выдача новых проектов (основной канал);
   - `projects/0.1/projects/seo` — данные заказчика по seo_url: verification (payment_verified, deposit_made и т.д.), рейтинг работодателя, `other_employer_jobs` (проверено 04.10.2026);
