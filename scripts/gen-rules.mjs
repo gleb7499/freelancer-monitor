@@ -10,6 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCES = {
   RULES_FREELANCER_SELECTION: "rules/freelancer-правила-отбора.md",
   RULES_BID_SKILL: "rules/отклик-скилл.md",
+  RULES_HUMANIZE: "rules/humanize.md",
 };
 
 let out = "// GENERATED FILE — do not edit. Source: rules/*.md (npm run gen:rules)\n";

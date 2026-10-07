@@ -1,5 +1,5 @@
 import type { Order } from "./types";
-import { RULES_FREELANCER_SELECTION, RULES_BID_SKILL } from "./generated/rules";
+import { RULES_FREELANCER_SELECTION, RULES_BID_SKILL, RULES_HUMANIZE } from "./generated/rules";
 
 export interface ScoringPromptOptions {
   weeklyLimitHours: number;
@@ -112,6 +112,12 @@ ${RULES_BID_SKILL}
 Output contract: ONLY the bid text itself, in natural human English, no explanations or meta-commentary. Plain text only: ASCII characters only — no em/en dashes (use "-"), no arrows, no curly quotes, no Markdown formatting (no bold/italic/backticks); lists only with "- " if needed. HARD LIMIT: at most 1500 characters total (the platform does not allow editing a bid longer than that after posting — verified 2026-10-05). Aim for 1200-1400 characters; if the material overflows, cut examples and repetitions, never the hook or the price. 120-250 words.`;
 
 export const BID_TEXT_MAX_CHARS = 1500;
+
+// Второй проход редактуры: humanize-промт из rules/humanize.md (приоритетные
+// правила проекта в его конце). Ошибка этого вызова не фатальна — берём черновик.
+export const HUMANIZE_SYSTEM_PROMPT = `You are the second-pass editor for a freelance bid draft. Rewrite the draft per the editor rules below — project rules at the end outrank everything else. Return ONLY the rewritten bid text: plain text, ASCII only, no Markdown, no semicolons, 1200-1400 characters max.
+
+${RULES_HUMANIZE}`;
 
 export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): string {
   const balance =

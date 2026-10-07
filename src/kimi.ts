@@ -5,6 +5,7 @@ import {
   SCORING_JSON_SCHEMA,
   BID_TEXT_SYSTEM_PROMPT,
   BID_TEXT_MAX_CHARS,
+  HUMANIZE_SYSTEM_PROMPT,
   buildScoringUserMessage,
   type ScoringContext,
 } from "./prompts";
@@ -277,10 +278,11 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     const scoreFor = (b: number) => {
       const f = feeFor(order, b, rate);
       const n = b - f;
-      return Math.min(
-        100,
-        Math.round((toUsd(n, rate) / s.ai_hours / cfg.targetHourly) * 100)
-      );
+      // Для hourly bid_amount — уже часовая ставка: повторное деление на
+      // ai_hours занижало бы score. Для fixed делим весь бюджет на часы работы.
+      const usd = toUsd(n, rate);
+      const base = order.type === "hourly" ? usd : usd / s.ai_hours;
+      return Math.min(100, Math.round((base / cfg.targetHourly) * 100));
     };
     // Соседняя точка ради score НЕ поднимает цену: цена — детерминированная
     // формула стратегии отзывов; низкий score — ожидаемое следствие, порог
@@ -302,18 +304,6 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
           ? [30, 30, 40]
           : [30, 70];
   }
-  let verdict: "BID" | "PASS" = s.verdict;
-  if (verdict === "BID" && valueScore < cfg.bidMinScore) {
-    console.warn("scoreOrder: BID force-passed by code recheck", {
-      id: order.id,
-      valueScore,
-      bidMinScore: cfg.bidMinScore,
-      net,
-      ai_hours: s.ai_hours,
-    });
-    verdict = "PASS";
-    valueScore = 0;
-  }
   let weeklyLimit: number | null = null;
   if (order.type === "hourly") {
     if (
@@ -323,6 +313,36 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     ) {
       weeklyLimit = Math.floor(s.weekly_limit_hours);
     }
+  }
+  let verdict: "BID" | "PASS" = s.verdict;
+  if (verdict === "BID" && valueScore < cfg.bidMinScore) {
+    const scoreBefore = valueScore;
+    console.warn("scoreOrder: BID force-passed by code recheck", {
+      id: order.id,
+      valueScore,
+      bidMinScore: cfg.bidMinScore,
+      net,
+      ai_hours: s.ai_hours,
+    });
+    verdict = "PASS";
+    valueScore = 0;
+    return {
+      verdict,
+      reason: `${s.reason} [код: value_score=${scoreBefore} < ${cfg.bidMinScore}]`,
+      summary_ru: s.summary_ru,
+      hours: { opt: s.hours.opt, real: s.hours.real, pess: s.hours.pess },
+      red_flags: s.red_flags,
+      check_manually: s.check_manually,
+      bid_amount: bid,
+      net_amount: net,
+      weekly_limit_hours: weeklyLimit,
+      delivery_days: s.delivery_days,
+      deadline_caveat: s.deadline_caveat,
+      take_upgrades: s.take_upgrades,
+      value_score: valueScore,
+      ai_hours: s.ai_hours,
+      milestone_plan: milestonePlan,
+    };
   }
   return {
     verdict,
@@ -467,7 +487,8 @@ export function buildBidMessages(
     portfolioBlock =
       `\n\nPortfolio published on the platform profile (titles + descriptions below).` +
       ` When the client asks for examples/links or a piece is directly relevant, reference` +
-      ` 1-2 items BY TITLE ONLY — never paste any URL in the bid text. Instead point to the` +
+      ` 1-2 items BY TITLE ONLY, wrapping every referenced title in ASCII double quotes` +
+      ` (e.g. "Real Estate Card Page") — never paste any URL in the bid text. Instead point to the` +
       ` profile and mention that a live demo link sits at the end of that project's` +
       ` description on the profile. This is always stronger than emphasizing the new account.` +
       ` Never invent project names or links.\n${lines}`;
@@ -482,8 +503,14 @@ export function buildBidMessages(
     `\nPricing context (code-set): the bid is ${score.bid_amount} ${order.currency_code}` +
     ` — a deliberately low, review-farming price (bottom of the range or 0.65x the` +
     ` average competitor bid). The bid text must NOT call this a "discount off my usual rate";` +
-    ` explain it as: an experienced developer for whom this platform is new, pricing low to earn` +
-    ` the first review here — with the usual standard of work.`;
+    ` explain it as: this platform is new to me, so I'm pricing my first project here low to earn` +
+    ` the first review — with the usual standard of work. Explain your experience using EXACTLY` +
+    ` ONE of these phrasings (adapt the amount/details to the order): "I've been building websites` +
+    ` for a while ...", "I've got solid experience building websites ...", "My background is in` +
+    ` building and shipping responsive websites ...", "I already have solid web development` +
+    ` experience ...", "I've been doing this for a while ...", "This platform is new to me, so I'm` +
+    ` pricing my first project here at $X to earn that first review." The direct phrase` +
+    ` "I'm an experienced developer" is FORBIDDEN.`;
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
     {
@@ -546,6 +573,23 @@ export async function generateBidText(
   messages: { role: string; content: string }[]
 ): Promise<string> {
   let text = sanitizeBidText(await chat(env, messages));
+  // Второй проход: humanize-редактура по rules/humanize.md. Сбой не фатален —
+  // отправляем черновик первого прохода без редактуры.
+  try {
+    const humanized = sanitizeBidText(
+      await chat(env, [
+        { role: "system", content: HUMANIZE_SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ])
+    );
+    if (humanized.length > 0) {
+      text = humanized;
+    } else {
+      console.warn("generateBidText: humanize pass returned empty text, keeping draft");
+    }
+  } catch (e) {
+    console.warn("generateBidText: humanize pass failed, keeping draft:", String(e));
+  }
   if (text.length > BID_TEXT_MAX_CHARS) {
     // Одна попытка сжать осознанно; если снова перебор — жёсткая обрезка.
     try {

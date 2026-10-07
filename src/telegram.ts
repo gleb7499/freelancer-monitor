@@ -101,9 +101,16 @@ export function formatOrderCard(
     score.verdict === "BID"
       ? score.bid_amount / orderRate(order)
       : (order.budget_min + order.budget_max) / 2;
-  parts.push(
-    `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBaseUsd / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
-  );
+  if (order.type === "hourly") {
+    // Ставка уже часовая — делить на ai_hours неверно; показываем часовой net.
+    parts.push(
+      `🎯 Value: ${score.value_score}/100 (~$${Math.round(score.net_amount / orderRate(order))}/ч на руки)`,
+    );
+  } else {
+    parts.push(
+      `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBaseUsd / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
+    );
+  }
   parts.push(`✅ Вердикт: ${score.verdict} — ${values.REASON}`);
   if (score.verdict === "BID") {
     const sign = order.currency_sign;

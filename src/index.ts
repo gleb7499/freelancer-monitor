@@ -289,8 +289,11 @@ async function processOrder(
       if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
         header += `\n⚠️ sealed НЕ куплен (покупка через API отклонена: ${bidResult.sealPurchase}) — купи вручную на сайте, если нужно`;
       }
-    } else if (bidResult.reason === "insufficient-balance") {
+    } else if (bidResult.reason?.startsWith("insufficient-balance")) {
       header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
+      if (bidResult.reason.length > "insufficient-balance".length) {
+        header += `\nПричина API: ${bidResult.reason}`;
+      }
       await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
     } else if (bidResult.reason === "verification-required") {
       header = `⚠️ Отклик НЕ отправлен: заказ закрыт для нашего аккаунта — платформа требует верификацию Freelancer (категория Cryptocurrency) либо статус Preferred Freelancer`;

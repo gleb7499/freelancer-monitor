@@ -165,7 +165,7 @@ export async function placeBid(
     lower.includes("insufficient")
   ) {
     console.error("bidder.insufficient-balance", { id: order.id, status: res.status, text });
-    return { placed: false, reason: "insufficient-balance" };
+    return { placed: false, reason: `insufficient-balance${apiMessage ? `: ${apiMessage}` : ""}` };
   }
   // Крипто/премиум-заказы требуют верификации аккаунта (403 RESTRICTED...).
   if (

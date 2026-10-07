@@ -170,6 +170,23 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   const r = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 100 }), o, cfg);
   eq(r.verdict, "PASS", "score < BID_MIN_SCORE force-passed");
   eq(r.value_score, 0, "force-pass zeroes score");
+  ok(
+    r.reason.includes("[код: value_score=") && r.reason.includes("< 10"),
+    "force-pass reason carries code note",
+  );
+}
+
+// ---------- E2. hourly value_score: ставка уже часовая, ai_hours не делим ----------
+{
+  const oh = makeOrder({
+    type: "hourly",
+    budget_min: 25, budget_max: 50, budget_min_original: 25, budget_max_original: 50,
+  });
+  const r = normalizeScore(makeScore({ bid_amount: 30, ai_hours: 30 }), oh, cfg);
+  // bid snapped to bottom 25; fee 10% -> net 22.5; 22.5/20*100 = 112 -> 100.
+  eq(r.bid_amount, 25, "hourly: bottom of range");
+  eq(r.value_score, 100, "hourly: score without ai_hours division");
+  eq(r.verdict, "BID", "hourly: high score keeps BID");
 }
 
 // ---------- G. rate fallback (budget_min = 0) ----------
