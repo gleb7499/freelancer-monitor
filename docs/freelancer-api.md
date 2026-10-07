@@ -80,6 +80,21 @@ Body JSON: `{project_id, bidder_id, description, amount, period,
 milestone_percentage}`. `amount` — в валюте проекта; `milestone_percentage` —
 доля ПЕРВОГО этапа (30 = стартовый этап 30%).
 
+**Полный список полей публичного API** (источники: официальный Python-SDK
+`place_project_bid` и современный Go-SDK `CreateBidBody`, 07.10.2026):
+`project_id, bidder_id, amount, period, milestone_percentage, description,
+profile_id`. Обновление ставки (`PUT bids/{id}/` без action): `amount,
+milestone_percentage, description` (`UpdateBidBody`).
+
+**Чего в публичном API НЕТ** (проверено по SDK + живые пробы 07.10.2026):
+- графика этапов с суммами (веб-форма отклика умеет «Request milestone
+  payments» с произвольными строками описание+сумма — это внутренний
+  веб-эндпоинт, не публичный API; строки должны суммироваться в сумму ставки);
+- покупки апгрейдов в момент отклика (чекбоксы Sponsored/Sealed/Highlight на
+  форме — тот же внутренний путь; публично покупка только отдельным
+  `PUT bids/{id}/` после размещения);
+- видео-ставки.
+
 Авторизация Bearer-ключом проверена косвенно: фейковый `project_id=0` → 500
 (валидация), а не 401.
 
@@ -116,6 +131,15 @@ highlighted, time_submitted` — флаги ПОКУПОК видны, в отл
 Живые наблюдения 07.10.2026: на проекте с 137 ставками sealed купили 30,
 sponsored/highlighted — 0; `bid_count` в `bid_stats` актуальнее карточек
 монитора (они снимаются на момент intake).
+
+### `GET /api/projects/0.1/projects/{id}/bids` (закрытая) — вариант списка ставок
+
+Тоже работает с OAuth (07.10.2026); отдаёт `bid_rank` по каждой ставке
+(1, 2, 3…; у sealed-ставок `amount` скрыт — 0.0). Порядок для фрилансера —
+по дате (официально), ранговая сортировка видна работодателю; `bid_rank` даёт
+приблизительное представление о позиции. `GET …/projects/{id}/bids_info`
+(«информация для размещения ставки» из SDK) → 404: не существует или
+закрыто работодателю.
 
 ### `PUT /api/projects/0.1/bids/{bid_id}/` (закрытая) — действия над ставкой
 
