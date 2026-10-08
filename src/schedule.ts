@@ -69,6 +69,47 @@ function fmtMin(min: number): string {
   return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 }
 
+// Чистая функция для callback-кнопок графика (`sched:*`). Возвращает новый
+// график или ошибку (next тогда = исходный s, изменений нет).
+export function applyScheduleDelta(
+  s: Schedule,
+  action: string
+): { next: Schedule; error: string | null } {
+  const fail = (error: string) => ({ next: s, error });
+  if (action === "t") {
+    return { next: { ...s, enabled: !s.enabled }, error: null };
+  }
+  if (action.startsWith("p:")) {
+    const parts = action.slice(2).split(":").map(Number);
+    const [startMin, endMin] = parts;
+    if (
+      parts.length !== 2 ||
+      parts.some((n) => !Number.isInteger(n)) ||
+      startMin < 0 ||
+      startMin > 23 * 60 ||
+      endMin < 60 ||
+      endMin > 24 * 60
+    ) {
+      return fail("недопустимый пресет");
+    }
+    if (startMin >= endMin) return fail("начало должно быть раньше конца");
+    return { next: { ...s, startMin, endMin }, error: null };
+  }
+  const m = action.match(/^([se]):([+-]\d+)$/);
+  if (m) {
+    const delta = Number(m[2]);
+    let { startMin, endMin } = s;
+    if (m[1] === "s") startMin += delta;
+    else endMin += delta;
+    // Клемпы по допустимому диапазону + инвариант окна.
+    startMin = Math.min(23 * 60, Math.max(0, startMin));
+    endMin = Math.min(24 * 60, Math.max(60, endMin));
+    if (startMin >= endMin) return fail("начало должно быть раньше конца");
+    return { next: { ...s, startMin, endMin }, error: null };
+  }
+  return fail("неизвестное действие");
+}
+
 // Строка для /status и подтверждений: `08:00–20:00 (Минск), вкл`.
 export function formatSchedule(s: Schedule): string {
   return `${fmtMin(s.startMin)}–${fmtMin(s.endMin)} (Минск), ${s.enabled ? "вкл" : "выкл"}`;

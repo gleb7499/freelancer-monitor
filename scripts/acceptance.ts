@@ -7,7 +7,7 @@ import { preBidRejectReason } from "../src/service";
 import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
-import { isWithinSchedule, parseScheduleArgs, TIMEZONE_OFFSET_MS } from "../src/schedule";
+import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency } from "../src/index";
 import type { Order } from "../src/types";
 
@@ -276,6 +276,36 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(parseScheduleArgs("9"), null, "sched: one arg rejected");
   eq(parseScheduleArgs("-1 9"), null, "sched: negative rejected");
   eq(parseScheduleArgs("9 25"), null, "sched: >24 rejected");
+  // applyScheduleDelta: сдвиги, клемпы и инвариант окна.
+  const base = { startMin: 480, endMin: 1200, enabled: true };
+  const d1 = applyScheduleDelta(base, "s:+60");
+  eq(d1.next.startMin, 540, "sched: start +1h");
+  eq(d1.error, null, "sched: start shift ok");
+  eq(applyScheduleDelta(base, "s:-60").next.startMin, 420, "sched: start -1h");
+  eq(applyScheduleDelta(base, "e:+60").next.endMin, 1260, "sched: end +1h");
+  // start+60 дотягивается до end → инвариант нарушен → error, без изменений.
+  const tight = { startMin: 1140, endMin: 1200, enabled: true };
+  const d2 = applyScheduleDelta(tight, "s:+60");
+  ok(d2.error !== null && d2.next === tight, "sched: start+ crossing end rejected");
+  // end-60 уходит ниже start → error, без изменений.
+  const d3 = applyScheduleDelta(tight, "e:-60");
+  ok(d3.error !== null && d3.next === tight, "sched: end- crossing start rejected");
+  // Клемпы границ: start не выше 23:00, end не ниже 01:00, end не выше 24:00.
+  eq(applyScheduleDelta({ startMin: 1380, endMin: 1440, enabled: true }, "s:+60").next.startMin, 1380, "sched: start clamped at 23:00");
+  eq(applyScheduleDelta({ startMin: 0, endMin: 60, enabled: true }, "e:-60").next.endMin, 60, "sched: end clamped at 01:00");
+  eq(applyScheduleDelta({ startMin: 1380, endMin: 1440, enabled: true }, "e:+60").next.endMin, 1440, "sched: end clamped at 24:00");
+  // Тoggle и пресет.
+  eq(applyScheduleDelta(base, "t").next.enabled, false, "sched: toggle off");
+  eq(applyScheduleDelta({ ...base, enabled: false }, "t").next.enabled, true, "sched: toggle on");
+  const d4 = applyScheduleDelta(base, "p:540:1320");
+  eq(d4.next, { startMin: 540, endMin: 1320, enabled: true }, "sched: preset 9-22");
+  const d5 = applyScheduleDelta(base, "p:1200:480");
+  ok(d5.error !== null && d5.next === base, "sched: inverted preset rejected");
+  // Мусор.
+  const d6 = applyScheduleDelta(base, "xyz");
+  eq(d6.error, "неизвестное действие", "sched: garbage action rejected");
+  const d7 = applyScheduleDelta(base, "p:abc:def");
+  ok(d7.error !== null && d7.next === base, "sched: non-numeric preset rejected");
 }
 
 // ---------- K4. карточка: блок ручных действий ----------

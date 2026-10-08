@@ -14,7 +14,7 @@ import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert,
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
-import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule } from "./schedule";
+import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule, applyScheduleDelta, type Schedule } from "./schedule";
 import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";
 
@@ -557,6 +557,42 @@ const MODE_KEYBOARD = {
   ],
 };
 
+// Интерактивная клавиатура графика откликов: сдвиги начала/конца на час,
+// три пресета и переключатель окна. Раскладка кнопок зависит от текущего
+// состояния (подпись переключателя меняется на противоположную).
+function buildScheduleKeyboard(s: Schedule) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "➖ Начало", callback_data: "sched:s:-60" },
+        { text: "➕ Начало", callback_data: "sched:s:+60" },
+      ],
+      [
+        { text: "➖ Конец", callback_data: "sched:e:-60" },
+        { text: "➕ Конец", callback_data: "sched:e:+60" },
+      ],
+      [
+        { text: "🌅 8–20", callback_data: "sched:p:480:1200" },
+        { text: "🏙 9–22", callback_data: "sched:p:540:1320" },
+        { text: "🌃 10–24", callback_data: "sched:p:600:1440" },
+      ],
+      [
+        s.enabled
+          ? { text: "🔕 Выключить окно", callback_data: "sched:t" }
+          : { text: "🔔 Включить окно", callback_data: "sched:t" },
+      ],
+    ],
+  };
+}
+
+// Подпись сообщения графика: выключенное окно подаём как 24/7 — иначе неясно,
+// что «выкл» значит «откликаемся всегда».
+function scheduleCaption(s: Schedule): string {
+  return s.enabled
+    ? `График откликов: ${formatSchedule(s)}`
+    : `График откликов: ${formatSchedule(s)} (24/7)`;
+}
+
 // Команды оператора из Telegram. Принимаем только от TELEGRAM_CHAT_ID.
 async function handleTgCommand(
   env: Env,
@@ -587,7 +623,14 @@ async function handleTgCommand(
     const arg = trimmed.slice("/schedule".length).trim();
     const sched = await getSchedule(env);
     if (arg === "") {
-      await sendTelegram(env, `график откликов: ${formatSchedule(sched)}`);
+      // Без аргумента — интерактивная клавиатура; эхо команды удаляем
+      // (паттерн как у /mode).
+      await sendTelegram(env, scheduleCaption(sched), buildScheduleKeyboard(sched));
+      if (msg?.messageId !== undefined) {
+        execCtx.waitUntil(
+          deleteMessage(env, msg.chatId, msg.messageId).catch(() => undefined),
+        );
+      }
       return;
     }
     if (arg === "off" || arg === "on") {
@@ -678,6 +721,38 @@ async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext
             await answerCallbackQuery(env, callback.id, "неизвестный режим");
           }
         })().catch((e) => console.error("tg.callback failed:", e)),
+      );
+    }
+    if (String(cbChatId) === env.TELEGRAM_CHAT_ID && callback.data.startsWith("sched:")) {
+      const action = callback.data.slice("sched:".length);
+      log("tg.callback", { data: callback.data });
+      ctx.waitUntil(
+        (async () => {
+          const sched = await getSchedule(env);
+          const { next, error } = applyScheduleDelta(sched, action);
+          if (error !== null) {
+            // Граница окна или мусорный callback — состояние не трогаем,
+            // только всплывающая подсказка.
+            await answerCallbackQuery(env, callback.id, error);
+            return;
+          }
+          await setSchedule(env, next);
+          await answerCallbackQuery(env, callback.id, "ок");
+          // Заменяем то же сообщение: новая подпись + клавиатура под новое
+          // состояние (раскладка кнопок зависит от enabled).
+          const cbMessageId = callback.message?.message_id;
+          if (cbChatId !== undefined && typeof cbMessageId === "number") {
+            await editMessage(
+              env,
+              cbChatId,
+              cbMessageId,
+              scheduleCaption(next),
+              buildScheduleKeyboard(next),
+            );
+          } else {
+            await sendTelegram(env, scheduleCaption(next), buildScheduleKeyboard(next));
+          }
+        })().catch((e) => console.error("tg.sched-callback failed:", e)),
       );
     }
   }
