@@ -10,7 +10,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage, type ManualActions } from "./telegram";
+import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage, type ManualActions } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
@@ -688,6 +688,9 @@ async function handleTgWebhook(request: Request, env: Env, ctx: ExecutionContext
     if (String(chatId) === env.TELEGRAM_CHAT_ID) {
       const text = message.text;
       log("tg.command", { text });
+      // Меню команд перерегистрируем на каждую команду: свежее после любого
+      // деплоя и перезаписывает протухшие записи (setMyCommands заменяет список).
+      ctx.waitUntil(setMyCommands(env).catch((e) => console.warn("setMyCommands failed:", e)));
       ctx.waitUntil(
         handleTgCommand(env, text, ctx, { chatId, messageId: message.message_id }).catch(
           (e) => console.error("tg.command failed:", e),

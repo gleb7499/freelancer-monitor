@@ -261,7 +261,9 @@ export async function setWebhook(env: Env, webhookUrl: string): Promise<unknown>
 }
 
 // Меню команд бота (кнопка «/» в чате). BotFather не нужен — это Bot API.
-async function setMyCommands(env: Env): Promise<unknown> {
+// Экспортирована: перерегистрируется на каждую команду из вебхука (см. index.ts),
+// чтобы меню не протухало после деплоев (раньше обновлялось только в setWebhook).
+export async function setMyCommands(env: Env): Promise<unknown> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`;
   const res = await fetch(url, {
     method: "POST",
