@@ -24,8 +24,8 @@ const PRICES: Record<
   },
 };
 
-// Дневной лимит покупок sponsored: дорого и заметно, больше 2 в сутки не тратим.
-const SPONSORED_DAILY_LIMIT = 2;
+// Дневной лимит покупок sponsored: дорого и заметно, больше 3 в сутки не тратим.
+const SPONSORED_DAILY_LIMIT = 3;
 
 // Суточный счётчик покупок sponsored в KV: `sponsor:daily:{yyyymmdd}` (Минск).
 // TTL 2 суток — вчерашний ключ сам сгниёт, чистка не нужна.

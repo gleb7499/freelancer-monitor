@@ -345,9 +345,9 @@ async function testSponsoredDaily() {
     },
   } as any;
   const day = Date.UTC(2026, 9, 8, 12, 0, 0); // 08.10.2026 15:00 Минска
-  eq(await sponsoredDailyLeft(env, day), 2, "sponsored: fresh day -> 2 left");
+  eq(await sponsoredDailyLeft(env, day), 3, "sponsored: fresh day -> 3 left");
   await spendSponsored(env, day);
-  eq(await sponsoredDailyLeft(env, day), 1, "sponsored: after spend -> 1 left");
+  eq(await sponsoredDailyLeft(env, day), 2, "sponsored: after spend -> 2 left");
   await spendSponsored(env, day);
   await spendSponsored(env, day);
   eq(await sponsoredDailyLeft(env, day), 0, "sponsored: limit exhausted -> 0");

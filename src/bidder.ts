@@ -64,13 +64,14 @@ export async function placeBid(
     return { placed: false, reason: "preferred-only" };
   }
 
-  // Pre-flight: свежий bid_count. Заказ с разогнавшейся конкуренцией — пропуск.
+  // Pre-flight: свежий bid_count. Порог 50 (не 10): конкуренция — фактор
+  // скоринга, а не вето; отменяем ставку только при явно разогнавшейся гонке.
   try {
     const fresh = await fetchProjectsByIds(env, [order.id]);
     const freshOrder = fresh[0];
-    if (freshOrder && freshOrder.bids > 10) {
+    if (freshOrder && freshOrder.bids > 50) {
       console.log("bidder.preflight-cancel", { id: order.id, bids: freshOrder.bids });
-      return { placed: false, reason: "bids>10@preflight" };
+      return { placed: false, reason: "bids>50@preflight" };
     }
   } catch (e) {
     // Pre-flight недоступен (сеть/API) — не рискуем ставкой вслепую.

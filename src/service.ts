@@ -11,9 +11,9 @@ const SEEN_CLEANUP_INTERVAL_MS = 86400 * 1000;
 const FILTER_BATCH = 100;
 const INSERT_BATCH = 20;
 
-// Единственный жёсткий статический фильтр алерт-канала: конкуренция.
-// Бюджет/ставка НЕ фильтруются — ценовая пригодность решает только LLM.
-const MAX_BIDS_GATE = 10;
+// Единственный жёсткий статический фильтр алерт-канала был конкуренция
+// (bids > 10) — снят 08.10.2026: конкуренция теперь фактор скоринга, не вето.
+// Остаётся мягкий пре-гейт физической возможности ставки (ниже).
 
 function chunks<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -95,9 +95,10 @@ export function preBidRejectReason(order: Order): string | null {
   return null;
 }
 
-// Заказы с источника (официальный API) — жёсткие фильтры до LLM:
-// bids > 10 и мягкий пре-гейт физической возможности ставки (preBidRejectReason,
-// требует заполненного order.client — enrich идёт ДО вызова).
+// Заказы с источника (официальный API) — фильтр до LLM: мягкий пре-гейт
+// физической возможности ставки (preBidRejectReason, требует заполненного
+// order.client — enrich идёт ДО вызова). Конкуренция (bids) фильтром не
+// отсекается — её оценивает скоринг как фактор.
 // Все увиденные помечаются в seen (source из параметра), отказники — rejected.
 export async function markAlertSeen(
   env: Env,
@@ -107,8 +108,7 @@ export async function markAlertSeen(
   if (orders.length === 0) return { kept: [], rejected: [] };
   const reasons = new Map<number, string>();
   for (const o of orders) {
-    const r =
-      o.bids > MAX_BIDS_GATE ? "rej:bids>10" : (preBidRejectReason(o) ?? null);
+    const r = preBidRejectReason(o);
     if (r !== null) reasons.set(o.id, r);
   }
   const records = orders.map((o) => ({

@@ -10,6 +10,7 @@ import {
   type ScoringContext,
 } from "./prompts";
 import { getBidsBalance } from "./bids-balance";
+import { sponsoredDailyLeft } from "./upgrades";
 import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
 
 export class KimiError extends Error {
@@ -385,12 +386,21 @@ async function chatWithRetries(
 
 export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | null> {
   const cfg = getConfig(env);
-  let bidsCtx: ScoringContext = { bidsBalance: null, nextBidInMinutes: null };
+  let bidsCtx: ScoringContext = {
+    bidsBalance: null,
+    nextBidInMinutes: null,
+    sponsoredLeft: null,
+  };
   try {
     const b = await getBidsBalance(env);
-    bidsCtx = { bidsBalance: b.balance, nextBidInMinutes: b.nextBidInMinutes };
+    bidsCtx = { ...bidsCtx, bidsBalance: b.balance, nextBidInMinutes: b.nextBidInMinutes };
   } catch (e) {
     console.warn("scoreOrder: bids balance unavailable", String(e));
+  }
+  try {
+    bidsCtx = { ...bidsCtx, sponsoredLeft: await sponsoredDailyLeft(env) };
+  } catch (e) {
+    console.warn("scoreOrder: sponsored daily limit unavailable", String(e));
   }
   const messages = [
     { role: "system", content: buildScoringSystemPrompt(cfg) },

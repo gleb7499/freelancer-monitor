@@ -10,6 +10,8 @@ export interface ScoringPromptOptions {
 export interface ScoringContext {
   bidsBalance: number | null;
   nextBidInMinutes: number | null;
+  // Остаток дневного лимита sponsored-покупок (null — KV недоступен).
+  sponsoredLeft: number | null;
 }
 
 // Кодовая обвязка промпта: только контракт с кодом (формат вывода, env-значения,
@@ -18,7 +20,8 @@ export interface ScoringContext {
 export function buildScoringSystemPrompt(opts: ScoringPromptOptions): string {
   return `You are the scoring engine for a freelancer. Freelancer profile stack: React, Next.js, TypeScript, HTML/CSS, Java Spring Boot, PostgreSQL, Docker. The account is new with no reviews. Goal: win first projects.
 
-Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders; code already drops orders with bids > 10 before you see them). Code does NOT filter by budget or rate — price fitness is decided by you per the rules below.
+Code-enforced facts (do not re-evaluate): static filters already applied (English, no fulltime, fresh orders). Code does NOT filter by budget, rate or bids count — price fitness and competition are decided by you per the rules below.
+Competition factor (bids field in the order JSON): bids <= 10 — normal; 11–25 — be pickier, BID only for a perfect stack fit with a reliable client; > 25 — PASS by default, exception: direct profile hit + reliable client + strong value. Competition is a factor, not a veto.
 
 Selection rules below are the single source of truth (in Russian — follow them exactly; they outrank this wrapper if in conflict):
 
@@ -38,7 +41,7 @@ Scoring mechanics (code contract):
 - Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes price estimates; you only pick the set.
   - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed).
   - If bids <= 5 (first five bidders) — ONLY sealed. "sponsored" is FORBIDDEN there.
-  - "sponsored" — ONLY if bids > 15 AND ALL hold (USD equivalents, estimate via the budget exchange rate): fixed project, net >= $50, reliable client (deposit_made OR is_escrow_project OR prepaid_milestone OR client rating >= 4), estimated sponsored price (0.75% of the bid, min $1.90, max $19.99 — dynamic in reality) <= min($6, net x 0.03), and the slot is likely still free (so many bids usually mean someone already took it — weigh this). The slot is ONE per project: whoever buys first takes it, there is no auction, the position does not degrade as bids accumulate.
+  - "sponsored" — ONLY if bids > 15 AND ALL hold (USD equivalents, estimate via the budget exchange rate): fixed project, net >= $50, reliable client (deposit_made OR is_escrow_project OR prepaid_milestone OR client rating >= 4), estimated sponsored price (0.75% of the bid, min $1.90, max $19.99 — dynamic in reality) <= min($6, net x 0.03), and the slot is likely still free (so many bids usually mean someone already took it — weigh this). The slot is ONE per project: whoever buys first takes it, there is no auction, the position does not degrade as bids accumulate. sponsored purchases left today (from user message): if 0 — do NOT propose sponsored at all; if 1 — propose only for the most obvious case.
 
 Language rules: fields reason, red_flags, check_manually, deadline_caveat, summary_ru are read by a Russian-speaking operator — write them IN RUSSIAN. verdict, bid_amount, net_amount, delivery_days, hours, value_score, ai_hours stay as before (values, not prose).
 
@@ -126,8 +129,10 @@ export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): str
       : "unknown";
   const regen =
     ctx && ctx.nextBidInMinutes !== null ? String(ctx.nextBidInMinutes) : "unknown";
+  const sponsoredLeft =
+    ctx && ctx.sponsoredLeft !== null ? String(ctx.sponsoredLeft) : "unknown";
   return (
-    `Bids balance: ${balance}; next bid regenerates in (minutes): ${regen}.\n` +
+    `Bids balance: ${balance}; next bid regenerates in (minutes): ${regen}; sponsored purchases left today: ${sponsoredLeft}.\n` +
     "Score this order: " +
     JSON.stringify(order)
   );

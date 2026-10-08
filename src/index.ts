@@ -150,23 +150,24 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         }
       }
 
-      // Жёсткий гейт до LLM: bids > 10 + физическая возможность ставки.
+      // Гейт до LLM: физическая возможность ставки (конкуренция — не гейт,
+      // её оценивает скоринг как фактор).
       const { kept, rejected } = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length, rejected: rejected.length });
-      ordersToScore.push(...kept);      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
+      ordersToScore.push(...kept);
+
+      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
       if (mode === "test") {
         for (const { order, reason } of rejected) {
           const human =
-            reason === "rej:bids>10"
-              ? `уже ${order.bids} откликов (лимит ≤10 до LLM)`
-              : reason === "rej:recruiter"
-                ? "recruiter-проект — только для Preferred Freelancer"
-                : reason === "rej:kyc-required"
-                  ? "заказ требует KYC-верификации аккаунта"
-                  : reason === "rej:crypto-verified"
-                    ? "крипто-проект — нужна верификация Freelancer"
-                    : reason;
+            reason === "rej:recruiter"
+              ? "recruiter-проект — только для Preferred Freelancer"
+              : reason === "rej:kyc-required"
+                ? "заказ требует KYC-верификации аккаунта"
+                : reason === "rej:crypto-verified"
+                  ? "крипто-проект — нужна верификация Freelancer"
+                  : reason;
           await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
         }
       }
@@ -323,7 +324,7 @@ async function processOrder(
         reason = "слот занят";
       } else {
         const left = await sponsoredDailyLeft(env);
-        if (left <= 0) reason = "лимит дня: 2 sponsored/сутки";
+        if (left <= 0) reason = "лимит дня: 3 sponsored/сутки";
       }
       if (reason !== null) {
         score.take_upgrades = score.take_upgrades.filter((u) => u !== "sponsored");
