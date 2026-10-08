@@ -1,5 +1,4 @@
-import type { Env, Order, ScoreResult, UpgradeId } from "./types";
-import { priceUpgrades, totalPrice } from "./upgrades";
+import type { Env, Order, ScoreResult } from "./types";
 
 export class TelegramError extends Error {
   status: number;
@@ -75,15 +74,29 @@ export function formatPassCard(order: Order, score: ScoreResult): string {
   return parts.join("\n\n");
 }
 
+// Блок ручных действий в карточке BID: sealed всегда покупается вручную
+// (API требует PFP), sponsored — на усмотрение оператора по статусу слота.
+// bidId=null в test-режиме (ставка не размещена — ссылки нет).
+export interface ManualActions {
+  bidId: number | null;
+  // null — слот не проверен (запрос bids не удался).
+  slotFree: boolean | null;
+  // Ценовая метка sponsored из priceUpgrades, напр. "sponsored ~$1.90".
+  sponsoredPrice: string;
+  // Если код выкинул sponsored из плана — причина вместо статуса слота.
+  sponsoredRemovedNote?: string;
+  // Test-режим: ставка не размещена, ссылку на bid не печатаем.
+  test?: boolean;
+}
+
 // Карточка только для вердикта BID (после placeBid).
 export function formatOrderCard(
   order: Order,
   score: ScoreResult,
   bidText: string | null,
-  removedUpgrades?: UpgradeId[],
+  manualActions?: ManualActions | null,
 ): string {
   const values: Record<string, string> = {
-    SUMMARY: escHtml(score.summary_ru),
     REASON: escHtml(score.reason),
     REDFLAGS: escHtml(score.red_flags.join("; ")),
     CHECKMANUALLY: escHtml(score.check_manually.join("; ")),
@@ -95,22 +108,7 @@ export function formatOrderCard(
   parts.push(`💰 Бюджет: ${budgetLine(order)}`);
   const avgPart = order.bid_avg != null ? ` (ср. $${order.bid_avg})` : "";
   parts.push(`👥 Откликов: ${order.bids}${avgPart}`);
-  parts.push(`📝 Суть: ${values.SUMMARY}`);
 
-  const rateBaseUsd =
-    score.verdict === "BID"
-      ? score.bid_amount / orderRate(order)
-      : (order.budget_min + order.budget_max) / 2;
-  if (order.type === "hourly") {
-    // Ставка уже часовая — делить на ai_hours неверно; показываем часовой net.
-    parts.push(
-      `🎯 Value: ${score.value_score}/100 (~$${Math.round(score.net_amount / orderRate(order))}/ч на руки)`,
-    );
-  } else {
-    parts.push(
-      `🎯 Value: ${score.value_score}/100 (~$${Math.round(rateBaseUsd / Math.max(1, score.ai_hours))}/ч при ${score.ai_hours} AI-ч)`,
-    );
-  }
   parts.push(`✅ Вердикт: ${score.verdict} — ${values.REASON}`);
   if (score.verdict === "BID") {
     const sign = order.currency_sign;
@@ -124,33 +122,14 @@ export function formatOrderCard(
   if (order.type === "hourly" && score.weekly_limit_hours !== null) {
     parts.push(`⏱ Weekly limit: ${score.weekly_limit_hours} ч/нед`);
   }
-  parts.push(
-    `⏱ Срок: ${score.delivery_days} дн (оценка ${score.hours.opt}/${score.hours.real}/${score.hours.pess} ч)`,
-  );
+  const deadlinePart =
+    score.deadline_caveat != null ? `; дедлайн: ${escHtml(score.deadline_caveat)}` : "";
+  parts.push(`⏱ Срок: ${score.delivery_days} дн${deadlinePart}`);
   if (score.red_flags.length > 0) {
     parts.push(`🚩 Красные флаги: ${values.REDFLAGS}`);
   }
-  if (score.deadline_caveat != null) {
-    parts.push(`📅 Дедлайн: ${escHtml(score.deadline_caveat)}`);
-  }
   if (score.check_manually.length > 0) {
     parts.push(`⚠️ Проверь вручную: ${values.CHECKMANUALLY}`);
-  }
-  if (score.take_upgrades.length > 0) {
-    const prices = priceUpgrades(score.take_upgrades, score.bid_amount);
-    const approx = prices.some((p) => p.approx);
-    const total = totalPrice(prices);
-    parts.push(
-      `🎟 План апгрейдов (цены оценочные, покупка отдельным шагом): ${prices.map((p) => p.label).join(", ")} (итого ${approx ? "~" : ""}$${total.toFixed(2)})`,
-    );
-    if (score.take_upgrades.includes("sponsored")) {
-      parts.push(
-        `⚠️ На форме проверь: если написано rank #2 — спонсор уже занят, сними галочку`,
-      );
-    }
-  }
-  if (removedUpgrades && removedUpgrades.length > 0) {
-    parts.push(`✂️ Срезано по потолку 3%/$3: ${removedUpgrades.join(", ")}`);
   }
   if (order.is_seller_kyc_required) {
     parts.push(`🪪 Нужна верификация аккаунта для ставки`);
@@ -160,16 +139,34 @@ export function formatOrderCard(
     parts.push(`✉️ Текст ставки (EN):\n<blockquote>${escHtml(bidText)}</blockquote>`);
   }
 
+  // Консоль действий: sealed — ручная покупка, sponsored — по статусу слота.
+  if (manualActions) {
+    const ma = manualActions;
+    const lines = ["🛠 Ручные действия:"];
+    lines.push(`1. Sealed - $0.10: открой ставку и купи Sealed`);
+    if (ma.sponsoredRemovedNote) {
+      lines.push(`2. ${ma.sponsoredPrice} - не берём: ${ma.sponsoredRemovedNote}`);
+    } else if (score.take_upgrades.includes("sponsored")) {
+      const slot = ma.slotFree === null ? "не проверен" : ma.slotFree ? "свободен" : "занят";
+      lines.push(`2. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
+    }
+    if (ma.bidId !== null) {
+      lines.push(`🔗 https://www.freelancer.com/bid/${ma.bidId}`);
+    } else if (ma.test) {
+      lines[lines.length - 1] += " (test: ставка не размещена, ссылки нет)";
+    }
+    parts.push(lines.join("\n"));
+  }
+
   parts.push(`🔗 <a href="${escHtml(order.url)}">Открыть заказ</a>`);
 
   let text = parts.join("\n\n");
-  // Shrink in priority order: summary, reason, flags, check_manually, then bid
-  // as last resort. Text content only — tags (b/blockquote/a) stay paired.
+  // Shrink in priority order: flags, check_manually, reason, then bid text as
+  // last resort. Text content only — tags (b/blockquote/a) stay paired.
   const shrinkTargets = [
-    { marker: values.SUMMARY, raw: score.summary_ru },
-    { marker: values.REASON, raw: score.reason },
     { marker: values.REDFLAGS, raw: score.red_flags.join("; ") },
     { marker: values.CHECKMANUALLY, raw: score.check_manually.join("; ") },
+    { marker: values.REASON, raw: score.reason },
     { marker: bidText ? escHtml(bidText) : "", raw: bidText ?? "", suffix: "…(truncated)" },
   ];
 
@@ -272,7 +269,8 @@ async function setMyCommands(env: Env): Promise<unknown> {
     body: JSON.stringify({
       commands: [
         { command: "mode", description: "Режим: /mode test | live | off" },
-        { command: "status", description: "Режим, баланс bids, статистика за сутки" },
+        { command: "schedule", description: "График откликов: /schedule 9 22 | on | off" },
+        { command: "status", description: "Режим, график, баланс bids, статистика за сутки" },
       ],
     }),
     signal: AbortSignal.timeout(15000),

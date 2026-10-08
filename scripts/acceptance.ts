@@ -6,7 +6,8 @@ import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, CRYPTO_SKILL_I
 import { preBidRejectReason } from "../src/service";
 import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
-import { enforceUpgradeCap } from "../src/upgrades";
+import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
+import { isWithinSchedule, parseScheduleArgs, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency } from "../src/index";
 import type { Order } from "../src/types";
 
@@ -246,11 +247,80 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(isAwarded({ award_status: "pending" } as any), false, "not awarded: pending");
 }
 
-// ---------- K. enforceUpgradeCap ----------
+// ---------- K. enforceUpgradeCap (потолок 15% от ставки) ----------
 {
-  const capped = enforceUpgradeCap(["sealed", "sponsored"], 5000, 4500);
-  eq(capped.kept.includes("sponsored"), false, "cap cuts sponsored first");
-  eq(capped.kept.includes("sealed"), true, "cap keeps sealed");
+  // bid 500: cap $75; sealed $0.10 + sponsored ~$3.75 — оба проходят.
+  const capped = enforceUpgradeCap(["sealed", "sponsored"], 500, 450);
+  eq(capped.kept.includes("sponsored"), true, "cap 15%: sponsored kept on $500 bid");
+  eq(capped.kept.includes("sealed"), true, "cap 15%: sealed kept on $500 bid");
+  // bid 30: cap $4.50; sponsored ~$1.90 + $0.10 = $2.00 <= 4.50 — проходит.
+  const small = enforceUpgradeCap(["sealed", "sponsored"], 30, 25);
+  eq(small.kept.includes("sponsored"), true, "cap 15%: sponsored ~$1.90 fits $4.50 cap");
+  // bid 10: cap $1.50; sponsored ~$1.90 + $0.10 = $2.00 > 1.50 — вырезается.
+  const tiny = enforceUpgradeCap(["sealed", "sponsored"], 10, 8);
+  eq(tiny.kept.includes("sponsored"), false, "cap 15%: sponsored cut on $10 bid");
+  eq(tiny.kept.includes("sealed"), true, "cap 15%: sealed survives cut");
+}
+
+// ---------- K3. schedule: окно откликов по Минску ----------
+{
+  const s = { startMin: 480, endMin: 1200, enabled: true }; // 08:00–20:00
+  const at = (h: number, m: number) => 86400_000 * 1000 + (h * 60 + m) * 60_000 - TIMEZONE_OFFSET_MS;
+  eq(isWithinSchedule(s, at(8, 0)), true, "sched: 08:00 inside");
+  eq(isWithinSchedule(s, at(19, 59)), true, "sched: 19:59 inside");
+  eq(isWithinSchedule(s, at(7, 59)), false, "sched: 07:59 outside");
+  eq(isWithinSchedule(s, at(20, 0)), false, "sched: 20:00 outside");
+  eq(isWithinSchedule({ ...s, enabled: false }, at(3, 0)), true, "sched: disabled -> always true");
+  eq(parseScheduleArgs("9 22"), { startMin: 540, endMin: 1320 }, "sched: parse 9 22");
+  eq(parseScheduleArgs("22 9"), null, "sched: start >= end rejected");
+  eq(parseScheduleArgs("9"), null, "sched: one arg rejected");
+  eq(parseScheduleArgs("-1 9"), null, "sched: negative rejected");
+  eq(parseScheduleArgs("9 25"), null, "sched: >24 rejected");
+}
+
+// ---------- K4. карточка: блок ручных действий ----------
+{
+  const o = makeOrder({ id: 42 });
+  const score = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, take_upgrades: ["sealed", "sponsored"] }), o, cfg);
+  const plain = formatOrderCard(o, score, "Bid text here.");
+  ok(!plain.includes("Ручные действия"), "card: no manual block without manualActions");
+  ok(!plain.includes("📝 Суть"), "card: summary line removed");
+  ok(!plain.includes("🎯 Value"), "card: value line removed");
+  const withMa = formatOrderCard(o, score, "Bid text here.", {
+    bidId: 123,
+    slotFree: true,
+    sponsoredPrice: "sponsored ~$1.90",
+  });
+  ok(withMa.includes("Ручные действия"), "card: manual block present");
+  ok(withMa.includes("https://www.freelancer.com/bid/123"), "card: bid link");
+  ok(withMa.includes("слот свободен"), "card: slot status free");
+  const removed = formatOrderCard(o, { ...score, take_upgrades: ["sealed"] }, "Bid.", {
+    bidId: null,
+    slotFree: false,
+    sponsoredPrice: "sponsored ~$1.90",
+    sponsoredRemovedNote: "слот занят",
+    test: true,
+  });
+  ok(removed.includes("не берём: слот занят"), "card: sponsored removal note");
+  ok(!removed.includes("/bid/"), "card: no bid link in test mode");
+}
+
+// ---------- K5. sponsoredDailyLeft (mock KV) ----------
+async function testSponsoredDaily() {
+  const store = new Map<string, string>();
+  const env = {
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _opts?: unknown) => void store.set(k, v),
+    },
+  } as any;
+  const day = Date.UTC(2026, 9, 8, 12, 0, 0); // 08.10.2026 15:00 Минска
+  eq(await sponsoredDailyLeft(env, day), 2, "sponsored: fresh day -> 2 left");
+  await spendSponsored(env, day);
+  eq(await sponsoredDailyLeft(env, day), 1, "sponsored: after spend -> 1 left");
+  await spendSponsored(env, day);
+  await spendSponsored(env, day);
+  eq(await sponsoredDailyLeft(env, day), 0, "sponsored: limit exhausted -> 0");
 }
 
 // ---------- L. fetchProjectClient (mock fetch) ----------
@@ -559,6 +629,7 @@ async function testConcurrencyPool() {
   await testArtifacts();
   await testOrderContext();
   await testConcurrencyPool();
+  await testSponsoredDaily();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

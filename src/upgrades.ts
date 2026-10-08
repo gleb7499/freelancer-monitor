@@ -1,4 +1,4 @@
-import type { UpgradeId } from "./types";
+import type { Env, UpgradeId } from "./types";
 
 export interface UpgradePrice {
   id: UpgradeId;
@@ -24,6 +24,49 @@ const PRICES: Record<
   },
 };
 
+// Дневной лимит покупок sponsored: дорого и заметно, больше 2 в сутки не тратим.
+const SPONSORED_DAILY_LIMIT = 2;
+
+// Суточный счётчик покупок sponsored в KV: `sponsor:daily:{yyyymmdd}` (Минск).
+// TTL 2 суток — вчерашний ключ сам сгниёт, чистка не нужна.
+function sponsoredDayKey(dateMs: number): string {
+  const d = new Date(dateMs + 3 * 3600_000); // Europe/Minsk, UTC+3 без переходов
+  const yyyymmdd = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+  return `sponsor:daily:${yyyymmdd}`;
+}
+
+// Сколько sponsored-покупок осталось сегодня. Ошибки KV не блокируют покупку
+// (лимит — самодисциплина, а не защита от платформы): при сбое отвечаем лимитом.
+export async function sponsoredDailyLeft(env: Env, dateMs = Date.now()): Promise<number> {
+  try {
+    const raw = await env.ORDERS_KV.get(sponsoredDayKey(dateMs));
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as { count?: unknown };
+      if (typeof parsed.count === "number" && Number.isFinite(parsed.count)) {
+        return Math.max(0, SPONSORED_DAILY_LIMIT - parsed.count);
+      }
+    }
+  } catch (e) {
+    console.warn("sponsoredDailyLeft: KV read failed, assuming full limit", String(e));
+  }
+  return SPONSORED_DAILY_LIMIT;
+}
+
+// Зафиксировать покупку sponsored (+1 к сегодняшнему счётчику).
+export async function spendSponsored(env: Env, dateMs = Date.now()): Promise<void> {
+  try {
+    const left = await sponsoredDailyLeft(env, dateMs);
+    const count = SPONSORED_DAILY_LIMIT - left + 1;
+    await env.ORDERS_KV.put(
+      sponsoredDayKey(dateMs),
+      JSON.stringify({ count }),
+      { expirationTtl: 2 * 86400 },
+    );
+  } catch (e) {
+    console.warn("spendSponsored: KV write failed", String(e));
+  }
+}
+
 export function priceUpgrades(take: UpgradeId[], bidAmount: number): UpgradePrice[] {
   return take.map((id) => ({ id, ...PRICES[id](bidAmount) }));
 }
@@ -41,6 +84,9 @@ function extractAmount(label: string): number {
   return m ? Number(m[1]) : 0;
 }
 
+// Потолок суммы ВСЕХ апгрейдов заказа: 15% от суммы ставки (философия:
+// допы — дешёвый рычаг, а не статья расходов; sealed $0.10 проходит почти
+// всегда, вырезается в основном sponsored).
 export function enforceUpgradeCap(
   take: UpgradeId[],
   bidAmount: number,
@@ -48,7 +94,8 @@ export function enforceUpgradeCap(
 ): { kept: UpgradeId[]; removed: UpgradeId[] } {
   const kept = [...take];
   const removed: UpgradeId[] = [];
-  const cap = Math.min(netAmount * 0.03, 3);
+  const cap = bidAmount * 0.15;
+  void netAmount; // оставлено в сигнатуре для совместимости вызовов
 
   const costOf = (ids: UpgradeId[]) =>
     totalPrice(priceUpgrades(ids, bidAmount));

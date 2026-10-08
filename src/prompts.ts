@@ -38,7 +38,7 @@ Scoring mechanics (code contract):
 - Upgrades: fill take_upgrades with ONLY the upgrades worth buying (empty array if none). Code computes price estimates; you only pick the set.
   - "sealed" — always, EXCEPT orders with hidebids=true (project already sealed).
   - If bids <= 5 (first five bidders) — ONLY sealed. "sponsored" is FORBIDDEN there.
-  - If 5 < bids <= 10 — "sponsored" at your discretion when ALL hold (USD equivalents, estimate via the budget exchange rate): fixed project, net >= $100, reliable client (deposit_made OR is_escrow_project OR prepaid_milestone OR client rating >= 4), estimated sponsored price (0.75% of the bid, min $1.90, max $19.99 — dynamic in reality) <= min($6, net x 0.03). The slot is ONE per project: whoever buys first takes it, there is no auction, the position does not degrade as bids accumulate.
+  - "sponsored" — ONLY if bids > 15 AND ALL hold (USD equivalents, estimate via the budget exchange rate): fixed project, net >= $50, reliable client (deposit_made OR is_escrow_project OR prepaid_milestone OR client rating >= 4), estimated sponsored price (0.75% of the bid, min $1.90, max $19.99 — dynamic in reality) <= min($6, net x 0.03), and the slot is likely still free (so many bids usually mean someone already took it — weigh this). The slot is ONE per project: whoever buys first takes it, there is no auction, the position does not degrade as bids accumulate.
 
 Language rules: fields reason, red_flags, check_manually, deadline_caveat, summary_ru are read by a Russian-speaking operator — write them IN RUSSIAN. verdict, bid_amount, net_amount, delivery_days, hours, value_score, ai_hours stay as before (values, not prose).
 

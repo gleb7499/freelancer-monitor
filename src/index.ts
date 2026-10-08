@@ -10,10 +10,11 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
-import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
+import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, answerCallbackQuery, editMessage, deleteMessage, type ManualActions } from "./telegram";
+import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft } from "./upgrades";
 import { placeBid } from "./bidder";
 import { getMode, setMode, type Mode } from "./mode";
+import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule } from "./schedule";
 import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";
 
@@ -115,6 +116,16 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     );
   }
 
+  // График работы откликов: вне окна (по Минску) опрос заказов и LLM
+  // пропускаем. Этапы выше уже проверены — они идут всегда, в любое время.
+  const sched = await getSchedule(env);
+  if (!isWithinSchedule(sched, Date.now())) {
+    log("tick.skipped-schedule", {});
+    await finishTick(env, stats, startedAt);
+    await flushLogBuffer(env);
+    return stats;
+  }
+
   const ordersToScore: Order[] = [];
 
   // --- Единственный канал: официальный публичный API projects/active ---
@@ -208,6 +219,42 @@ interface BidReservation {
   reserved: number;
 }
 
+// Свежие ставки заказа: GET /bids/?projects[]={id} с той же логикой авторизации,
+// что в placeBid (OAuth либо Bearer). Слот sponsored свободен, если ни у одной
+// ставки нет sponsored=true. bids приходит списком или словарём (оба разбираем,
+// по образцу milestones.ts fetchMyBids). Ошибка/не-ok → null ("не проверен").
+async function fetchSponsoredSlotFree(
+  env: Env,
+  cfg: Config,
+  order: Order,
+): Promise<boolean | null> {
+  const authHeaders: Record<string, string> | null = cfg.flOauthToken
+    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
+    : cfg.flApiKey
+      ? { Authorization: `Bearer ${cfg.flApiKey}` }
+      : null;
+  if (!authHeaders) return null;
+  try {
+    const res = await fetch(`${cfg.freelancerBase}/bids/?projects[]=${order.id}`, {
+      headers: authHeaders,
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { status?: string; result?: { bids?: unknown } };
+    if (data.status !== "success") return null;
+    const bids = data.result?.bids;
+    const list: { sponsored?: boolean }[] = Array.isArray(bids)
+      ? (bids as { sponsored?: boolean }[])
+      : bids && typeof bids === "object"
+        ? (Object.values(bids) as { sponsored?: boolean }[])
+        : [];
+    return !list.some((b) => b && b.sponsored === true);
+  } catch (e) {
+    console.warn("fetchSponsoredSlotFree failed:", { id: order.id, err: String(e) });
+    return null;
+  }
+}
+
 async function processOrder(
   env: Env,
   order: Order,
@@ -247,7 +294,7 @@ async function processOrder(
     // bidsBalance — снимок до пула; reserved — BID'ы этого тика.
     if (bidsBalance !== null && bidsBalance - bidCtx.reserved <= 0) {
       bidCtx.reserved += 1;
-      await sendTelegram(env, `⚠️ Отклик НЕ отправлен: bids exhausted in tick\n\n${formatOrderCard(order, score, null, [])}`);
+      await sendTelegram(env, `⚠️ Отклик НЕ отправлен: bids exhausted in tick\n\n${formatOrderCard(order, score, null)}`);
       await logImportant(env, "order.notified", {
         id: order.id,
         title: order.title.slice(0, 80),
@@ -258,11 +305,35 @@ async function processOrder(
     }
     bidCtx.reserved += 1;
 
+    // Статус слота sponsored: один запрос bids на заказ — переиспользуется
+    // и фильтром плана ниже, и блоком ручных действий в карточке. Ошибка /
+    // не-ok → null ("не проверен"): слот как фактор не учитываем, но и не
+    // блокируем из-за него отклик.
+    const slotFree = await fetchSponsoredSlotFree(env, cfg, order);
+
+    // Философия sponsored (rules): код довыкидывает sponsored из плана LLM
+    // по жёстким фактам, которые модель видит хуже/позже. Неопределённость
+    // слота (null) — НЕ повод выкидывать: цена допа ограничена потолком 15%.
+    let sponsoredRemovedNote: string | undefined;
+    if (score.take_upgrades.includes("sponsored")) {
+      let reason: string | null = null;
+      if (order.bids <= 15) {
+        reason = "bids <= 15 (sponsored не нужен)";
+      } else if (slotFree === false) {
+        reason = "слот занят";
+      } else {
+        const left = await sponsoredDailyLeft(env);
+        if (left <= 0) reason = "лимит дня: 2 sponsored/сутки";
+      }
+      if (reason !== null) {
+        score.take_upgrades = score.take_upgrades.filter((u) => u !== "sponsored");
+        sponsoredRemovedNote = reason;
+      }
+    }
+
     const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-    let removedUpgrades: UpgradeId[] = [];
     if (cap.removed.length > 0) {
       score.take_upgrades = cap.kept;
-      removedUpgrades = cap.removed;
     }
 
     let bidText: string | null = null;
@@ -278,7 +349,20 @@ async function processOrder(
 
     const bidResult = await placeBid(env, order, score, bidText);
 
-    const card = formatOrderCard(order, score, bidText, removedUpgrades);
+    // Консоль действий в карточке: sealed — ручная покупка всегда; ссылка на
+    // ставку — только если она реально размещена (в test-режиме bidId=null).
+    const manualActions: ManualActions | null =
+      score.take_upgrades.length > 0 || score.verdict === "BID"
+        ? {
+            bidId: bidResult.placed ? (bidResult.bidId ?? null) : null,
+            slotFree,
+            sponsoredPrice: priceUpgrades(["sponsored"], score.bid_amount)[0].label,
+            sponsoredRemovedNote,
+            test: mode === "test",
+          }
+        : null;
+
+    const card = formatOrderCard(order, score, bidText, manualActions);
     const sign = order.currency_sign ?? "$";
     let header: string;
     if (mode === "test") {
@@ -499,8 +583,33 @@ async function handleTgCommand(
     return;
   }
 
+  if (trimmed.startsWith("/schedule")) {
+    const arg = trimmed.slice("/schedule".length).trim();
+    const sched = await getSchedule(env);
+    if (arg === "") {
+      await sendTelegram(env, `график откликов: ${formatSchedule(sched)}`);
+      return;
+    }
+    if (arg === "off" || arg === "on") {
+      const next = { ...sched, enabled: arg === "on" };
+      await setSchedule(env, next);
+      await sendTelegram(env, `график откликов: ${formatSchedule(next)} ✅`);
+      return;
+    }
+    const parsed = parseScheduleArgs(arg);
+    if (parsed === null) {
+      await sendTelegram(env, "ошибка: часы 0-24, начало < конца (например: /schedule 9 22)");
+      return;
+    }
+    const next = { ...parsed, enabled: true };
+    await setSchedule(env, next);
+    await sendTelegram(env, `график откликов: ${formatSchedule(next)} ✅`);
+    return;
+  }
+
   if (trimmed === "/status") {
     const mode = await getMode(env);
+    const sched = await getSchedule(env);
     const balance = await getBidsBalance(env);
     const stats = await seenStats24h(env);
     const lines = stats.map((s) => `  ${s.status}/${s.source}: ${s.count}`);
@@ -512,7 +621,7 @@ async function handleTgCommand(
     log("tg.status", { mode, balance: balance.balance, source: balance.source });
     await sendTelegram(
       env,
-      [`режим: ${mode}`, balanceLine, `seen за 24ч:`, ...lines].join("\n"),
+      [`режим: ${mode}`, `график откликов: ${formatSchedule(sched)}`, balanceLine, `seen за 24ч:`, ...lines].join("\n"),
     );
     return;
   }
