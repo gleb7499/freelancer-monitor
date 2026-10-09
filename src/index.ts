@@ -195,8 +195,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         }
       }
 
-      // Гейт до LLM: физическая возможность ставки (конкуренция — не гейт,
-      // её оценивает скоринг как фактор).
+      // Гейт до LLM: физическая возможность ставки + жёсткая конкуренция
+      // (>50 откликов уже при появлении — см. preBidRejectReason).
       const { kept, rejected } = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length, rejected: rejected.length });
@@ -212,7 +212,9 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
                 ? "заказ требует KYC-верификации аккаунта"
                 : reason === "rej:crypto-verified"
                   ? "крипто-проект — нужна верификация Freelancer"
-                  : reason;
+                  : reason === "rej:hot-competition"
+                    ? "больше 50 откликов уже при появлении — конкуренция бешеная и растёт, шанс попасть в топ выдачи низкий"
+                    : reason;
           await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
         }
       }

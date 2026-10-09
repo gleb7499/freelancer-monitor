@@ -88,10 +88,18 @@ async function insertSeen(env: Env, records: SeenRecord[]): Promise<void> {
 // Детектируется после enrich (fetchProjectClient): recruiter/KYC-флаги —
 // из заказа, крипто-скилл — из ответа projects/seo.
 // Возвращает reason вида `rej:...` или null (заказ можно скорить).
+
+// Жёсткая конкуренция на входе: заказ берётся секунд после публикации, так что
+// >50 откликов уже в момент появления = аукцион бешеный и растёт, шанс попасть
+// в топ выдачи клиента низкий — отклоняем кодом, не тратя LLM. Больше число
+// откликов нигде не используется: LLM его не видит (см. buildScoringUserMessage).
+const HOT_BIDS_THRESHOLD = 50;
+
 export function preBidRejectReason(order: Order): string | null {
   if (order.upgrades.recruiter) return "rej:recruiter";
   if (order.is_seller_kyc_required) return "rej:kyc-required";
   if (order.client?.skill_ids?.includes(CRYPTO_SKILL_ID)) return "rej:crypto-verified";
+  if (order.bids > HOT_BIDS_THRESHOLD) return "rej:hot-competition";
   return null;
 }
 

@@ -57,7 +57,11 @@ export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): str
       ctx && ctx.nextBidInMinutes !== null ? String(ctx.nextBidInMinutes) : "unknown",
     SPONSORED_LEFT: ctx && ctx.sponsoredLeft !== null ? String(ctx.sponsoredLeft) : "unknown",
   });
-  return head + " " + JSON.stringify(order);
+  // Число откликов LLM не передаём: конкуренцию решает кодовый гейт на входе
+  // (>50 при появлении → rej:hot-competition), текущий счётчик секунд после
+  // публикации — шум. bid_avg уходит вместе с ним (цена ставки считает код).
+  const { bids: _bids, bid_avg: _bidAvg, ...llmOrder } = order;
+  return head + " " + JSON.stringify(llmOrder);
 }
 
 // Ретрай после неудавшейся валидации JSON скоринга: ошибки и подсказка
