@@ -324,7 +324,7 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
     sponsoredPrice: "sponsored ~$1.90",
   });
   ok(withMa.includes("Ручные действия"), "card: manual block present");
-  ok(withMa.includes("https://www.freelancer.com/bid/123"), "card: bid link");
+  ok(!withMa.includes("/bid/"), "card: no bid link in manual block");
   ok(withMa.includes("слот свободен"), "card: slot status free");
   const removed = formatOrderCard(o, { ...score, take_upgrades: ["sealed"] }, "Bid.", {
     bidId: null,
