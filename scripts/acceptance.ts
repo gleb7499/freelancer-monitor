@@ -427,6 +427,17 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   });
   ok(removed.includes("не берём: слот занят"), "card: sponsored removal note");
   ok(!removed.includes("/bid/"), "card: no bid link in test mode");
+  // Регрессия 09.10.2026: note с "<=" («bids <= 15») уходил в Telegram без
+  // экранирования → 400 «Unsupported start tag» и карточка терялась целиком.
+  const lt = formatOrderCard(o, { ...score, take_upgrades: ["sealed"] }, "Bid.", {
+    bidId: null,
+    slotFree: true,
+    sponsoredPrice: "sponsored ~$1.90",
+    sponsoredRemovedNote: "bids <= 15 (sponsored не нужен)",
+    test: true,
+  });
+  ok(!lt.includes("<="), "card: '<=' in removal note is escaped");
+  ok(lt.includes("bids &lt;= 15"), "card: escaped note content present");
 }
 
 // ---------- K5. sponsoredDailyLeft (mock KV) ----------

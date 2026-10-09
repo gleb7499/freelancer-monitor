@@ -16,16 +16,18 @@ Cloudflare Worker (TypeScript) that monitors Freelancer.com via **two intake cha
 4. Repo is public. Treat anything added to git as published.
 5. **No inline prompts.** All prompt text lives in `prompts/*.md` (imported as text via the `rules` entry in `wrangler.toml`; esbuild in the acceptance script uses `--loader:.md=text`). Code in `src/prompts.ts` only substitutes `{{TOKEN}}` placeholders. JSON response schemas (machine contracts) stay in code. This is a hard project rule — new prompt text goes into a file, never into a template literal.
 6. **Deploy only via GitHub CI** (`.github/workflows/deploy.yml` — push в `main` → typecheck → `wrangler deploy`). Агент НЕ деплоит напрямую (`npm run deploy` / `wrangler deploy` запрещены). Пайплайн: изменения → локальные проверки БЕЗ запуска локальной копии (typecheck, acceptance — без `wrangler dev`, без локальных серверов) → коммит → пуш сразу в `main` (или текущую рабочую ветку), без PR. Прямой деплой — только в исключительной ситуации «без этого никак», с явным уведомлением пользователя.
+7. **Тестировать проект локально ЗАПРЕЩЕНО — только удалённо** (решение Gleb'а, 09.10.2026). Никаких `wrangler dev`, локальных прогонов тика/скоринга против реальных API и секретов, локальных эмуляторов с прод-данными. Единственные локальные проверки — оффлайн-логика без сети и секретов: `npm run typecheck` и `npm run acceptance`. Проверка работы системы — только на выкачанном через CI воркере (health-check, `/test/*`, `wrangler tail`, чтение KV/D1 — см. урок ниже про `--remote`). Локальный KV-эмулятор (`.wrangler/`) хранит устаревший мусор с прошлых сессий — диагноз по нему вводит в заблуждение (инцидент 09.10.2026: «застывшие курсоры» и «mode=test» оказались локальным хранилищем, прод был здоров).
 
 ## Commands
 
 ```bash
 npm install          # deps
 npm run typecheck    # tsc --noEmit — must pass before any commit
-npm run deploy       # wrangler deploy (OAuth login locally)
-wrangler dev         # local dev server; reads .dev.vars for secrets
+npm run acceptance   # оффлайн-приёмка (без сети и секретов) — тоже перед коммитом
 wrangler types       # regenerate Env types after config/binding changes
 ```
+
+`npm run deploy` и `wrangler dev` — НЕ использовать (правило 6/7 выше): деплой только через GitHub CI, локальные прогоны запрещены.
 
 CI (GitHub Actions) deploys on every push to `main`: `npm ci` → `npm run typecheck` → `wrangler deploy` via `cloudflare/wrangler-action`. Requires repo secret `CLOUDFLARE_API_TOKEN`.
 
@@ -129,15 +131,18 @@ POST /test/set-webhook   — регистрация webhook Telegram (один �
 
 Before enabling/enlarging `[triggers] crons`, run the tick test and confirm cards arrive in Telegram. After changing `wrangler.toml` bindings, run `wrangler types` and `npm run typecheck`.
 
-## Local development
+## Локальные прогоны — ЗАПРЕЩЕНЫ
 
-- `npx wrangler dev` читает `.dev.vars`; локально там **нет** `FL_OAUTH_TOKEN` — закрытые точки и ставки тестируются с `--var FL_API_KEY:<ключ>` (Bearer-фолбэк).
-- Локальная проверка `/test/*` без `ADMIN_TOKEN`: временно добавить обход в `isAuthorized` (`src/index.ts`), проверить, **обязательно убрать до коммита**.
-- Временный файл приёмки исторически лежал в `tmp/` (в gitignore) — теперь стенд живёт в `scripts/acceptance.ts`.
+Правило 7 (решение Gleb'а, 09.10.2026): никаких `wrangler dev`, локальных тиков, эмуляторов с прод-данными. Локально — только оффлайн-проверки чистой логики (`typecheck`, `acceptance`). Любая проверка работы системы — на выкачанном через CI воркере.
+
+- **Чтение/запись KV из CLI — ТОЛЬКО с `--remote`.** Без флага `wrangler kv key get/put/delete` работает с локальным эмулятором (`.wrangler/`), где лежит устаревший мусор прошлых сессий — инцидент 09.10.2026: по таким «данным» был «диагностирован» несуществующий сбой прода (застывшие курсоры, «mode=test»). Проверка состояния прода: `npx wrangler kv key get mode --namespace-id b629829e784842d3a9c78f612f689974 --remote` (namespace id — из `wrangler.toml`).
+- `wrangler d1 query` на Windows падает с внутренней ошибкой (`UV_HANDLE_CLOSING`) — вместо него D1 читать через Cloudflare MCP (d1_database_query, database_id из `wrangler.toml`).
+- Временный файл приёмки исторически лежал в `tmp/` (в gitignore) — стенд живёт в `scripts/acceptance.ts`.
 
 ## Operational notes
 
-- **KV free tier = 1000 put / 1000 list / 100k read ops per day** (daily, not monthly). The code is shaped around this: the ring log buffers info entries in isolate memory and flushes once per tick with activity (`flushLogBuffer`), `markStatus` does not exist (status trail lives in the ring log and D1 `seen`). Seen-dedup was moved to D1 (`migrations/0001_seen.sql`) precisely because KV puts exceeded the free tier; only a few KV writes remain (seen-cleanup flag, alert throttle keys, active cursor, `search:*` cursor/throttle, `mode`). When adding KV writes, count them against the daily budget.
+- **Тариф аккаунта: Workers Paid ($5/мес)** (Gleb, 09.10.2026). Квоты KV на нём: запись/чтение/удаление — фактически без жёсткого дневного потолка (включено 1M записей и 10M чтений в месяц, сверх — $5/млн записей; ~3–4k записей/сутки от heartbeat/ring ≈ 10% включённого объёма, переплат нет), хранилище 1 ГБ. D1 на платном тарифе — без дневных лимитов строк. Устаревшая забота «1000 put/сутки» больше не ограничивает, но лишние записи всё равно не добавляем. Всё равно в силе: ring log буферизуется и флашится раз за тик, seen-дедуп в D1, KV-записей немного.
+- **Чтение прода — только с `--remote` и через MCP** (см. раздел выше про локальный эмулятор).
 - **D1 limits:** max 100 bound parameters per query — dedup batches accordingly (SELECT by ≤100 id, INSERT ≤20 rows). Remote migration applied via `wrangler d1 migrations apply freelancer-monitor --remote`.
 - First deploy of a fresh clone: create KV namespace, set the secrets, run the tests above, then enable crons.
 - The deployed worker already holds its secrets; CI `wrangler deploy` does not touch them.

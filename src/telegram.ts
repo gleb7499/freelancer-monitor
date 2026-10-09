@@ -156,7 +156,7 @@ export function formatOrderCard(
     const ma = manualActions;
     const lines = ["🛠 Ручные действия:"];
     if (ma.sponsoredRemovedNote) {
-      lines.push(`1. ${ma.sponsoredPrice} - не берём: ${ma.sponsoredRemovedNote}`);
+      lines.push(`1. ${ma.sponsoredPrice} - не берём: ${escHtml(ma.sponsoredRemovedNote)}`);
     } else if (score.take_upgrades.includes("sponsored")) {
       const slot = ma.slotFree === null ? "не проверен" : ma.slotFree ? "свободен" : "занят";
       lines.push(`1. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
