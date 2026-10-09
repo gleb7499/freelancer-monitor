@@ -15,6 +15,7 @@ Cloudflare Worker (TypeScript) that monitors Freelancer.com via **two intake cha
 3. **Never commit `.dev.vars`.** Example file: `.dev.vars.example`.
 4. Repo is public. Treat anything added to git as published.
 5. **No inline prompts.** All prompt text lives in `prompts/*.md` (imported as text via the `rules` entry in `wrangler.toml`; esbuild in the acceptance script uses `--loader:.md=text`). Code in `src/prompts.ts` only substitutes `{{TOKEN}}` placeholders. JSON response schemas (machine contracts) stay in code. This is a hard project rule — new prompt text goes into a file, never into a template literal.
+6. **Deploy only via GitHub CI** (`.github/workflows/deploy.yml` — push в `main` → typecheck → `wrangler deploy`). Агент НЕ деплоит напрямую (`npm run deploy` / `wrangler deploy` запрещены). Пайплайн: изменения → локальные проверки БЕЗ запуска локальной копии (typecheck, acceptance — без `wrangler dev`, без локальных серверов) → коммит → пуш сразу в `main` (или текущую рабочую ветку), без PR. Прямой деплой — только в исключительной ситуации «без этого никак», с явным уведомлением пользователя.
 
 ## Commands
 
