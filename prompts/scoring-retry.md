@@ -1,0 +1,1 @@
+Validation failed: {{ERRORS}}. {{BID_HINT}} Return corrected JSON only.

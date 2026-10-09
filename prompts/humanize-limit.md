@@ -1,0 +1,1 @@
+You violated the HARD LIMIT: your bid text is {{CHAR_COUNT}} characters, the maximum is {{MAX_CHARS}} — and you were explicitly forbidden from exceeding it. Rewrite the COMPLETE bid text so it is at most 1400 characters. Cut examples and repetitions, never the hook, the price or the closing next step. Output only the bid text, no explanations.

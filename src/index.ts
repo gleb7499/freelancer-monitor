@@ -2,7 +2,8 @@ import type { Env, Order, ScoreResult, UpgradeId } from "./types";
 import { getConfig, type Config } from "./config";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts } from "./enrich";
 import { filterNew, markAlertSeen, seenStats24h } from "./service";
-import { fetchActiveOrders } from "./sources/freelancer-active";
+import { fetchActiveOrders, type ActiveOrdersResult } from "./sources/freelancer-active";
+import { fetchSearchOrders } from "./sources/freelancer-search";
 import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
 import {
   scoreOrder,
@@ -128,22 +129,66 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
 
   const ordersToScore: Order[] = [];
 
-  // --- Единственный канал: официальный публичный API projects/active ---
+  // --- Два канала intake: закрытая веб-лента (freelancer-auth-v2) и публичный
+  // поиск projects/active (без авторизации). Ошибка одного канала логируется
+  // с пометкой канала и не блокирует другой. Заказы каналов склеиваются по id:
+  // заказ, пришедший из обоих каналов за один тик, скорится один раз
+  // (внутритиковый дедуп; между тиками дедупликацию даёт D1 seen).
+  const merged = new Map<number, Order>();
+  let feedOrders = 0;
+  let searchOrders = 0;
+
+  const absorb = async (result: ActiveOrdersResult, channel: "feed" | "search"): Promise<void> => {
+    if (result.error !== null) {
+      stats.errors.push(result.error);
+      await logError(env, "active.error", { channel, message: result.error });
+      if (channel === "feed" && result.error.includes("UNAUTHORIZED")) {
+        await sendAuthAlertOnce(
+          env,
+          "feed:unauth-alerted",
+          3600,
+          "Веб-авторизация Freelancer протухла (401) — обнови через /admin/fl-auth",
+        );
+      }
+      return;
+    }
+    if (result.skipped) return;
+    if (channel === "feed") feedOrders = result.orders.length;
+    else searchOrders = result.orders.length;
+    for (const order of result.orders) {
+      if (!merged.has(order.id)) merged.set(order.id, order);
+    }
+  };
+
   try {
-    const active = await fetchActiveOrders(env);
-    if (active.error !== null) {
-      stats.errors.push(active.error);
-      await logError(env, "active.error", { message: active.error });
-    } else if (!active.skipped && active.orders.length > 0) {
-      stats.alertsFetched = active.orders.length;
-      log("active.fetched", { count: active.orders.length });
-      const fresh = await filterNew(env, active.orders);
+    await absorb(await fetchActiveOrders(env), "feed");
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    stats.errors.push(message);
+    await logError(env, "active.error", { channel: "feed", message });
+  }
+  try {
+    await absorb(await fetchSearchOrders(env), "search");
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    stats.errors.push(message);
+    await logError(env, "active.error", { channel: "search", message });
+  }
+
+  if (feedOrders > 0 || searchOrders > 0) {
+    stats.alertsFetched = feedOrders + searchOrders;
+    log("active.fetched", { count: merged.size });
+    console.log(
+      JSON.stringify({ step: "active.merged", feed: feedOrders, search: searchOrders, orders: merged.size }),
+    );
+    const fresh = await filterNew(env, [...merged.values()]);
 
       // Enrich ДО гейта: мягкий пре-гейт (recruiter/KYC/крипто-скилл) решается
-      // по данным projects/seo — туда же уходит order.client в скоринг.
+      // по данным заказчика из users/0.1/users (owner_id из элемента ленты) —
+      // туда же уходит order.client в скоринг.
       for (const order of fresh) {
         try {
-          order.client = await fetchProjectClient(env, order.url);
+          order.client = await fetchProjectClient(env, order.owner_id ?? null);
         } catch (e) {
           order.client = null;
           console.warn("fetchProjectClient failed:", { id: order.id, err: String(e) });
@@ -171,11 +216,6 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
           await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
         }
       }
-    }
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    stats.errors.push(message);
-    await logError(env, "active.error", { message });
   }
 
   if (ordersToScore.length === 0) {

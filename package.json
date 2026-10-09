@@ -12,7 +12,7 @@
     "pretypecheck": "npm run gen:rules",
     "predeploy": "npm run gen:rules",
     "typecheck": "tsc --noEmit",
-    "acceptance": "esbuild scripts/acceptance.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/acceptance.mjs --log-level=warning && node node_modules/.cache/acceptance.mjs",
+    "acceptance": "esbuild scripts/acceptance.ts --bundle --platform=node --format=esm --loader:.md=text --outfile=node_modules/.cache/acceptance.mjs --log-level=warning && node node_modules/.cache/acceptance.mjs",
     "deploy": "wrangler deploy"
   }
 }

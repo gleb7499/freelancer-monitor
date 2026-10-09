@@ -1,6 +1,5 @@
 import type { Env, Order, ScoreResult } from "./types";
 import { getConfig, type Config } from "./config";
-import { fetchProjectsByIds } from "./enrich";
 import { recordBidSpent } from "./bids-balance";
 import { getMode } from "./mode";
 
@@ -64,20 +63,14 @@ export async function placeBid(
     return { placed: false, reason: "preferred-only" };
   }
 
-  // Pre-flight: свежий bid_count. Порог 50 (не 10): конкуренция — фактор
-  // скоринга, а не вето; отменяем ставку только при явно разогнавшейся гонке.
-  try {
-    const fresh = await fetchProjectsByIds(env, [order.id]);
-    const freshOrder = fresh[0];
-    if (freshOrder && freshOrder.bids > 50) {
-      console.log("bidder.preflight-cancel", { id: order.id, bids: freshOrder.bids });
-      return { placed: false, reason: "bids>50@preflight" };
-    }
-  } catch (e) {
-    // Pre-flight недоступен (сеть/API) — не рискуем ставкой вслепую.
-    console.error("bidder.preflight-failed", { id: order.id, err: String(e) });
-    return { placed: false, reason: "preflight-failed" };
-  }
+  // Конкуренцию оценивает скоринг (фактор, не вето; см. prompts/scoring-system.md).
+  // Ранее здесь был preflight: свежий bid_count > 50 отменял ставку. Снят:
+  // после перевода enrich на веб-авторизацию authenticated-выдача стала
+  // возвращать счётчик, отличный от публичного (0/36 на карточке против >50
+  // в preflight), — метрика перестала быть сопоставимой с тем, что видел
+  // скоринг, и preflight стал системно резать обоснованные BID-вердикты,
+  // сжигая на них LLM-квоту. Ранк Freelancer не хронологический — поздняя
+  // ставка не мёртвая; ставка стоит регенерируемый bid.
 
   // Этапная оплата: ВСЕГДА на fixed, стартовый этап 30% (полный план —
   // score.milestone_plan, 30/70, 30/30/40 или 30/30/30/10; rest через

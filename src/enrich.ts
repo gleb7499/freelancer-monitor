@@ -1,18 +1,23 @@
 import type { Env, Order, ProjectClientInfo } from "./types";
 import { getConfig } from "./config";
 import { normalizeProject } from "./parser";
+import { WEB_USER_AGENT, resolveWebAuth, webAuthHeaders, type WebAuth } from "./web-auth";
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const FETCH_TIMEOUT_MS = 15000;
 
-// Открытые точки Freelancer API (без авторизации, нужен только User-Agent
-// обычного браузера):
-// - projects/0.1/projects/ — выдача проектов по id (fetchProjectsByIds);
-// - projects/0.1/projects/seo — данные заказчика по seo_url: verification,
-//   рейтинг работодателя, other_employer_jobs (проверено live 2026-10-04).
-// Закрытые точки (Authorization: Bearer <FL_API_KEY>):
-// - users/0.1/portfolios/?users[]=<id> — портфолио профиля (fetchPortfolio).
+// Все точки Freelancer в этом модуле — закрытые веб-вызовы: нужен только
+// браузерный User-Agent и заголовок freelancer-auth-v2 (см. web-auth.ts).
+// Авторизацию не проверяем здесь — при 401/UNAUTHORIZED точка просто отдаёт
+// null/ошибку, алерт о протухшем хэше шлёт источник данных.
+
+// Общий fetch с веб-заголовками; без разрешённой авторизации бросает.
+async function webFetch(auth: WebAuth | null, url: string, timeoutMs = FETCH_TIMEOUT_MS) {
+  if (auth === null) throw new Error("веб-авторизация не настроена (fl:auth или env)");
+  return fetch(url, {
+    headers: { "User-Agent": WEB_USER_AGENT, ...webAuthHeaders(auth) },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
 
 export interface PortfolioItem {
   id: number;
@@ -51,17 +56,17 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
   }
 
   const cfg = getConfig(env);
-  const authHeaders: Record<string, string> = cfg.flApiKey
-    ? { Authorization: `Bearer ${cfg.flApiKey}` }
-    : {};
+  const auth = await resolveWebAuth(env);
   let items: PortfolioItem[] = [];
   try {
     const url = new URL("https://www.freelancer.com/api/users/0.1/portfolios/");
+    url.searchParams.set("limit", "12");
     url.searchParams.set("users[]", cfg.flUserId);
-    const res = await fetch(url.toString(), {
-      headers: { "User-Agent": USER_AGENT, ...authHeaders },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    url.searchParams.set("featured", "false");
+    url.searchParams.set("exclude_empty_items", "true");
+    url.searchParams.set("webapp", "1");
+    url.searchParams.set("compact", "true");
+    const res = await webFetch(auth, url.toString());
     if (res.ok) {
       const data = (await res.json()) as {
         status?: string;
@@ -89,18 +94,24 @@ export async function fetchPortfolio(env: Env): Promise<PortfolioInfo | null> {
   }
   if (items.length === 0) return null;
 
-  // Username для прямых ссылок на элементы портфолио (анонимная точка users/{id}).
+  // Username для прямых ссылок на элементы портфолио (закрытая точка users).
   // Маршрут элемента: /u/<username>/portfolio-item/<id> (проверено 04.10.2026).
   let username: string | null = null;
   try {
-    const res = await fetch(
-      `https://www.freelancer.com/api/users/0.1/users/${cfg.flUserId}?compact=true`,
-      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
-    );
+    const url = new URL("https://www.freelancer.com/api/users/0.1/users");
+    url.searchParams.set("users[]", cfg.flUserId);
+    url.searchParams.set("status", "true");
+    url.searchParams.set("webapp", "1");
+    url.searchParams.set("compact", "true");
+    const res = await webFetch(auth, url.toString());
     if (res.ok) {
-      const data = (await res.json()) as { status?: string; result?: { username?: unknown } };
-      if (data.status === "success" && typeof data.result?.username === "string") {
-        username = data.result.username;
+      const data = (await res.json()) as {
+        status?: string;
+        result?: { users?: Record<string, { username?: unknown } | undefined> };
+      };
+      const name = data.result?.users?.[cfg.flUserId]?.username;
+      if (data.status === "success" && typeof name === "string") {
+        username = name;
       }
     }
   } catch {
@@ -163,7 +174,7 @@ function truncateArtifact(text: string): string {
 async function fetchArtifactText(url: string, name: string): Promise<OrderArtifact | null> {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": USER_AGENT },
+      headers: { "User-Agent": WEB_USER_AGENT },
       signal: AbortSignal.timeout(12000),
       redirect: "follow",
     });
@@ -212,15 +223,15 @@ async function fetchArtifactText(url: string, name: string): Promise<OrderArtifa
 // проекта) и страницы по ссылкам из описания. Любые ошибки → null/частичный
 // набор; ничего не бросает. Воркер без парсера PDF/DOCX — бинарники плейсхолдером.
 export async function fetchOrderArtifacts(env: Env, order: Order): Promise<OrderArtifact[] | null> {
-  void env;
+  const auth = await resolveWebAuth(env);
   const out: OrderArtifact[] = [];
 
   // 1) Вложения: не-compact карточка проекта отдаёт attachments/files/drive_files.
   const fileUrls: { url: string; name: string }[] = [];
   try {
-    const res = await fetch(
+    const res = await webFetch(
+      auth,
       `https://www.freelancer.com/api/projects/0.1/projects/?projects[]=${order.id}`,
-      { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
     );
     if (res.ok) {
       const data = (await res.json()) as {
@@ -294,15 +305,13 @@ export async function fetchOrderArtifacts(env: Env, order: Order): Promise<Order
 export async function fetchProjectsByIds(env: Env, ids: number[]): Promise<Order[]> {
   if (ids.length === 0) return [];
   const config = getConfig(env);
+  const auth = await resolveWebAuth(env);
   const url = new URL(`${config.freelancerBase}/projects/`);
   for (const id of ids) url.searchParams.append("projects[]", String(id));
   url.searchParams.set("full_description", "true");
   url.searchParams.set("compact", "true");
 
-  const response = await fetch(url.toString(), {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+  const response = await webFetch(auth, url.toString());
   if (!response.ok) {
     throw new Error(`fetchProjectsByIds: HTTP ${response.status}`);
   }
@@ -316,78 +325,117 @@ export async function fetchProjectsByIds(env: Env, ids: number[]): Promise<Order
   return (data.result.projects ?? []).map((project) => normalizeProject(project, "alerts"));
 }
 
-// GET /api/projects/0.1/projects/seo?seo_url=<slug>&webapp=1&compact=true
-// Открытая точка: отдаёт result.client (verification, rating,
-// registration_unixtime, address) и result.other_employer_jobs — другие
-// открытые заказы работодателя (проверено live 2026-10-04).
-// seoSlug — часть order.url после "https://www.freelancer.com/projects/".
-// Любая ошибка (404, не-JSON, сеть) → null, не бросает.
-export async function fetchProjectClient(env: Env, seoSlug: string): Promise<ProjectClientInfo | null> {
-  const slug = seoSlug.startsWith("https://www.freelancer.com/projects/")
-    ? seoSlug.slice("https://www.freelancer.com/projects/".length)
-    : seoSlug;
-  if (!slug) return null;
-
-  const url = new URL("https://www.freelancer.com/api/projects/0.1/projects/seo");
-  url.searchParams.set("seo_url", slug);
+// GET /api/users/0.1/users?users[]=<owner_id>&reputation=true&employer_reputation=true
+//   &jobs=true&status=true&country_details=true&avatar=true&webapp=1&compact=true
+// Закрытая точка: result.users[id] отдаёт status (verification-флаги),
+// reputation.entire_history (рейтинг и число отзывов), employer_reputation,
+// jobs (скиллы заказчика), registration_date, location.
+// ownerId нет или любая ошибка (404, не-JSON, сеть, нет авторизации) → null.
+export async function fetchProjectClient(
+  env: Env,
+  ownerId: number | null,
+): Promise<ProjectClientInfo | null> {
+  if (ownerId === null || !Number.isFinite(ownerId)) {
+    console.warn("fetchProjectClient: owner_id отсутствует — заказчик не обогащается");
+    return null;
+  }
+  const auth = await resolveWebAuth(env);
+  const url = new URL("https://www.freelancer.com/api/users/0.1/users");
+  url.searchParams.set("users[]", String(ownerId));
+  url.searchParams.set("reputation", "true");
+  url.searchParams.set("employer_reputation", "true");
+  url.searchParams.set("jobs", "true");
+  url.searchParams.set("status", "true");
+  url.searchParams.set("country_details", "true");
+  url.searchParams.set("avatar", "true");
   url.searchParams.set("webapp", "1");
   url.searchParams.set("compact", "true");
 
-  let data: {
-    status?: string;
-    result?: {
-      client?: {
-        registration_unixtime?: unknown;
-        address?: { city?: unknown; country?: unknown; country_code?: unknown } | null;
-        rating?: { average?: unknown; review_count?: unknown } | null;
-        verification?: {
-          payment_verified?: unknown;
-          email_verified?: unknown;
-          profile_complete?: unknown;
-          phone_verified?: unknown;
-          deposit_made?: unknown;
-        } | null;
-      } | null;
-      other_employer_jobs?: unknown;
-      skills?: unknown;
-    } | null;
-  };
+  let data: unknown;
   try {
-    const response = await fetch(url.toString(), {
-      headers: { "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (response.status === 404) return null;
+    const response = await webFetch(auth, url.toString());
     if (!response.ok) return null;
-    data = (await response.json()) as typeof data;
+    data = await response.json();
   } catch {
     return null;
   }
-  if (data.status !== "success" || !data.result) return null;
+  const info = mapUsersResponse(data, ownerId);
+  if (info === null) return null;
 
-  const client = data.result.client;
-  if (!client) return null;
+  // Число открытых заказов заказчика — отдельным закрытым вызовом
+  // projects?owners[]=<id> (аналог бывшего other_employer_jobs из открытого
+  // projects/seo). Недоступен → null, скоринг трактует как «неизвестно».
+  try {
+    const openUrl = new URL("https://www.freelancer.com/api/projects/0.1/projects");
+    openUrl.searchParams.set("owners[]", String(ownerId));
+    openUrl.searchParams.set("limit", "10");
+    openUrl.searchParams.set("webapp", "1");
+    openUrl.searchParams.set("compact", "true");
+    const res = await webFetch(auth, openUrl.toString());
+    if (res.ok) {
+      const d = (await res.json()) as { result?: { projects?: unknown } };
+      const list = d.result?.projects;
+      info.open_projects = Array.isArray(list) ? list.length : null;
+    }
+  } catch {
+    // open_projects остаётся null — не критично
+  }
+  return info;
+}
+
+// Чистый маппинг ответа точки users в ProjectClientInfo (для тестов).
+export function mapUsersResponse(data: unknown, ownerId: number): ProjectClientInfo | null {
+  if (typeof data !== "object" || data === null) return null;
+  const result = (data as { status?: unknown; result?: unknown }).result;
+  if (typeof result !== "object" || result === null) return null;
+  const users = (result as { users?: unknown }).users;
+  if (typeof users !== "object" || users === null) return null;
+  const user = (users as Record<string, unknown>)[String(ownerId)];
+  if (typeof user !== "object" || user === null) return null;
+  const u = user as Record<string, unknown>;
 
   const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
   const num = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? v : null;
 
-  const otherJobs = data.result.other_employer_jobs;
-  const skillsRaw = Array.isArray(data.result.skills) ? data.result.skills : [];
-  const skillIds = skillsRaw
-    .map((s) => (s && typeof s === "object" ? Number((s as { id?: unknown }).id) : NaN))
+  const status = (u.status ?? {}) as Record<string, unknown>;
+  const reputation =
+    typeof u.reputation === "object" && u.reputation !== null
+      ? (u.reputation as Record<string, unknown>)
+      : {};
+  // Имена полей рейтинга внутри entire_history не зафиксированы — читаем
+  // несколько вариантов (проверено live 07.10.2026: значения числа).
+  const history =
+    typeof reputation.entire_history === "object" && reputation.entire_history !== null
+      ? (reputation.entire_history as Record<string, unknown>)
+      : {};
+  const rating = num(history.rating ?? history.average ?? history.score);
+  const reviewCount = num(
+    history.review_count ?? history.reviews_count ?? history.number_of_reviews ?? history.reviews,
+  );
+  const regRaw = u.registration_date;
+  const registeredTs =
+    typeof regRaw === "number" ? num(regRaw) : typeof regRaw === "string" ? Date.parse(regRaw) / 1000 : null;
+  const location =
+    typeof u.location === "object" && u.location !== null
+      ? (u.location as Record<string, unknown>)
+      : {};
+  const jobs = Array.isArray(u.jobs) ? u.jobs : [];
+  const skillIds = jobs
+    .map((j) => (j && typeof j === "object" ? Number((j as { id?: unknown }).id) : NaN))
     .filter((n) => Number.isFinite(n) && n > 0);
 
   return {
-    payment_verified: bool(client.verification?.payment_verified),
-    deposit_made: bool(client.verification?.deposit_made),
-    email_verified: bool(client.verification?.email_verified),
-    phone_verified: bool(client.verification?.phone_verified),
-    rating: num(client.rating?.average),
-    review_count: num(client.rating?.review_count),
-    registered_ts: num(client.registration_unixtime),
-    country: typeof client.address?.country === "string" ? client.address.country : null,
-    open_projects: Array.isArray(otherJobs) ? otherJobs.length : null,
+    payment_verified: bool(status.payment_verified),
+    deposit_made: bool(status.deposit_made),
+    email_verified: bool(status.email_verified),
+    phone_verified: bool(status.phone_verified),
+    rating,
+    review_count: reviewCount,
+    registered_ts:
+      registeredTs !== null && Number.isFinite(registeredTs) ? registeredTs : null,
+    country: typeof location.country === "string" ? location.country : null,
+    open_projects: null,
     skill_ids: skillIds.length > 0 ? skillIds : null,
   };
 }

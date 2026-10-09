@@ -216,6 +216,12 @@ export async function sendTelegram(
   text: string,
   replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
 ): Promise<void> {
+  // Локальный прогон (DEV_MARKER=1 в .dev.vars): помечаем сообщения, чтобы
+  // не смешиваться с продом в одном чате (у dev своя D1 seen, дедуп общего
+  // чата на уровне кода невозможен).
+  if (env.DEV_MARKER === "1" && !text.startsWith("[DEV]")) {
+    text = `[DEV] ${text}`;
+  }
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   let body: Record<string, unknown> = {
     chat_id: env.TELEGRAM_CHAT_ID,

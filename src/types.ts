@@ -14,6 +14,9 @@ export interface Order {
   bids: number;
   bid_avg: number | null;
   client?: ProjectClientInfo | null;
+  // id заказчика (owner_info карточки / userId элемента ленты) — нужен enrich-у
+  // для выборки users/0.1/users по id.
+  owner_id?: number | null;
   description: string;
   language: string;
   submit_ts: number;
@@ -93,6 +96,9 @@ export interface Env {
   KIMI_MODEL: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
+  // "1" — локальный прогон: sendTelegram помечает сообщения префиксом [DEV].
+  // Задаётся только в .dev.vars, в проде отсутствует.
+  DEV_MARKER?: string;
   ADMIN_TOKEN: string;
   TICK_SCHEDULER: DurableObjectNamespace;
   FREELANCER_API_BASE: string;

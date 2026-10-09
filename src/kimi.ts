@@ -7,6 +7,13 @@ import {
   BID_TEXT_MAX_CHARS,
   HUMANIZE_SYSTEM_PROMPT,
   buildScoringUserMessage,
+  buildScoringRetryMessage,
+  buildBidWeeklyNote,
+  buildBidPortfolioNote,
+  buildBidMilestonesNote,
+  buildBidPriceNote,
+  buildBidUserMessage,
+  buildHumanizeLimitMessage,
   type ScoringContext,
 } from "./prompts";
 import { getBidsBalance } from "./bids-balance";
@@ -453,7 +460,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     { role: "assistant", content: raw },
     {
       role: "user" as const,
-      content: `Validation failed: ${errors.join("; ")}. ${bidHint} Return corrected JSON only.`,
+      content: buildScoringRetryMessage(errors, bidHint),
     },
   ];
   try {
@@ -490,56 +497,34 @@ export function buildBidMessages(
   score: ScoreResult,
   portfolio?: import("./enrich").PortfolioInfo | null
 ): { role: string; content: string }[] {
-  const weeklyNote =
-    order.type === "hourly" && score.weekly_limit_hours !== null
-      ? `\nWeekly availability limit for this bid: ${score.weekly_limit_hours} hours/week — if the text mentions hours per week or availability, do not exceed it.`
-      : "";
-  let portfolioBlock = "";
+  const notes: string[] = [];
+  if (order.type === "hourly" && score.weekly_limit_hours !== null) {
+    notes.push(buildBidWeeklyNote(score.weekly_limit_hours));
+  }
   if (portfolio && portfolio.items.length > 0) {
     const lines = portfolio.items
       .map((it) => `- ${it.title}: ${it.description}`)
       .join("\n");
-    portfolioBlock =
-      `\n\nPortfolio published on the platform profile (titles + descriptions below).` +
-      ` When the client asks for examples/links or a piece is directly relevant, reference` +
-      ` 1-2 items BY TITLE ONLY, wrapping every referenced title in ASCII double quotes` +
-      ` (e.g. "Real Estate Card Page") — never paste any URL in the bid text. Instead point to the` +
-      ` profile and mention that a live demo link sits at the end of that project's` +
-      ` description on the profile. This is always stronger than emphasizing the new account.` +
-      ` Never invent project names or links.\n${lines}`;
+    notes.push(buildBidPortfolioNote(lines));
   }
-  const milestoneNote =
-    score.milestone_plan && score.milestone_plan.length > 0
-      ? `\nMilestone plan (code-set, fixed in stone): first milestone 30% of the bid upfront,` +
-        ` then ${score.milestone_plan.slice(1).join("% / ")}% on the following stages` +
-        ` (${score.milestone_plan.join("/")}). State these exact shares in the bid text as the payment structure.`
-      : "";
-  const priceNote =
-    `\nPricing context (code-set): the bid is ${score.bid_amount} ${order.currency_code}` +
-    ` — a deliberately low, review-farming price (bottom of the range or 0.65x the` +
-    ` average competitor bid). The bid text must NOT call this a "discount off my usual rate";` +
-    ` explain it as: this platform is new to me, so I'm pricing my first project here low to earn` +
-    ` the first review — with the usual standard of work. Explain your experience using EXACTLY` +
-    ` ONE of these phrasings (adapt the amount/details to the order): "I've been building websites` +
-    ` for a while ...", "I've got solid experience building websites ...", "My background is in` +
-    ` building and shipping responsive websites ...", "I already have solid web development` +
-    ` experience ...", "I've been doing this for a while ...", "This platform is new to me, so I'm` +
-    ` pricing my first project here at $X to earn that first review." The direct phrase` +
-    ` "I'm an experienced developer" is FORBIDDEN.`;
+  if (score.milestone_plan && score.milestone_plan.length > 0) {
+    notes.push(
+      buildBidMilestonesNote(
+        score.milestone_plan.slice(1).join("% / "),
+        score.milestone_plan.join("/"),
+      ),
+    );
+  }
+  notes.push(buildBidPriceNote(score.bid_amount, order.currency_code));
   return [
     { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
     {
       role: "user",
-      content:
-        "Order:\n" +
-        JSON.stringify(order) +
-        "\n\nValidated score:\n" +
-        JSON.stringify(score) +
-        weeklyNote +
-        portfolioBlock +
-        milestoneNote +
-        priceNote +
-        "\n\nWrite the bid text now.",
+      content: buildBidUserMessage(
+        JSON.stringify(order),
+        JSON.stringify(score),
+        notes.join(""),
+      ),
     },
   ];
 }
@@ -633,12 +618,7 @@ export async function generateBidText(
   for (let attempt = 0; text.length > BID_TEXT_MAX_CHARS && attempt < 2; attempt++) {
     conv.push({
       role: "user",
-      content:
-        `You violated the HARD LIMIT: your bid text is ${text.length} characters, ` +
-        `the maximum is ${BID_TEXT_MAX_CHARS} — and you were explicitly forbidden ` +
-        `from exceeding it. Rewrite the COMPLETE bid text so it is at most 1400 ` +
-        `characters. Cut examples and repetitions, never the hook, the price or ` +
-        `the closing next step. Output only the bid text, no explanations.`,
+      content: buildHumanizeLimitMessage(text.length, BID_TEXT_MAX_CHARS),
     });
     try {
       const shorter = sanitizeBidText(await chat(env, conv));

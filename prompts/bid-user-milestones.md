@@ -1,0 +1,2 @@
+
+Milestone plan (code-set, fixed in stone): first milestone 30% of the bid upfront, then {{MILESTONES_REST}}% on the following stages ({{MILESTONES_FULL}}). State these exact shares in the bid text as the payment structure.

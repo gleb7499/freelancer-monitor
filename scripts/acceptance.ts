@@ -2,7 +2,9 @@
 // Запуск: npm run acceptance
 import { normalizeScore, validateScore, sanitizeBidText, capBidText } from "../src/kimi";
 import { isAwarded } from "../src/milestones";
-import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, CRYPTO_SKILL_ID } from "../src/enrich";
+import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, mapUsersResponse, CRYPTO_SKILL_ID } from "../src/enrich";
+import { parseFeedBody, mapFeedItem, mapCardToProject } from "../src/sources/freelancer-active";
+import { fetchSearchOrders, parseSearchBody } from "../src/sources/freelancer-search";
 import { preBidRejectReason } from "../src/service";
 import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
@@ -353,43 +355,244 @@ async function testSponsoredDaily() {
   eq(await sponsoredDailyLeft(env, day), 0, "sponsored: limit exhausted -> 0");
 }
 
-// ---------- L. fetchProjectClient (mock fetch) ----------
+// ---------- L. fetchProjectClient (mock fetch, закрытый users/0.1/users) ----------
 async function testClient() {
   const realFetch = globalThis.fetch;
-  const client = {
-    registration_unixtime: 1700000000,
-    address: { city: "Adana", country: "Turkey", country_code: "tr" },
-    rating: { average: 4.8, review_count: 12 },
-    verification: { payment_verified: true, email_verified: true, profile_complete: false, phone_verified: true, deposit_made: true },
+  const store = new Map<string, string>();
+  const env = {
+    FL_USER_ID: "94242579",
+    FL_AUTH_HASH: "test-hash",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _opts?: unknown) => void store.set(k, v),
+    },
+  } as any;
+  const user = {
+    id: 123,
+    username: "employer1",
+    registration_date: 1700000000,
+    location: { country: "Turkey", city: "Adana" },
+    status: {
+      payment_verified: true,
+      email_verified: true,
+      deposit_made: true,
+      identity_verified: false,
+      phone_verified: true,
+    },
+    reputation: { entire_history: { rating: 4.8, review_count: 12 } },
+    employer_reputation: { entire_history: { rating: 5.0, review_count: 3 } },
+    jobs: [{ id: 9, name: "Web" }, { id: CRYPTO_SKILL_ID, name: "Cryptocurrency" }],
   };
-  const env = {} as any;
+  const requestedUrls: string[] = [];
+  let authHeader: string | null = null;
+  globalThis.fetch = (async (url: string, init?: { headers?: Record<string, string> }) => {
+    requestedUrls.push(url);
+    authHeader = init?.headers?.["freelancer-auth-v2"] ?? null;
+    return new Response(JSON.stringify({ status: "success", result: { users: { "123": user } } }), { status: 200 });
+  }) as any;
 
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ status: "success", result: { client, other_employer_jobs: [{}, {}] } }), { status: 200 })) as any;
-  const full = await fetchProjectClient(env, "https://www.freelancer.com/projects/a/b");
+  const full = await fetchProjectClient(env, 123);
+  ok(full !== null, "client: mapped from users response");
   eq(full && full.payment_verified, true, "client: payment_verified parsed");
   eq(full && full.deposit_made, true, "client: deposit_made parsed");
+  eq(full && full.email_verified, true, "client: email_verified parsed");
+  eq(full && full.phone_verified, true, "client: phone_verified parsed");
   eq(full && full.rating, 4.8, "client: rating parsed");
   eq(full && full.review_count, 12, "client: review_count parsed");
-  eq(full && full.open_projects, 2, "client: open_projects = other_employer_jobs length");
+  eq(full && full.registered_ts, 1700000000, "client: registered_ts (unix)");
   eq(full && full.country, "Turkey", "client: country parsed");
+  eq(full && full.skill_ids, [9, CRYPTO_SKILL_ID], "client: skill_ids from jobs");
+  ok(full !== null && (full.open_projects === null || typeof full.open_projects === "number"), "client: open_projects number|null");
+  ok(
+    requestedUrls.some((u) => decodeURIComponent(u).includes("users[]=123")),
+    "client: request by owner id",
+  );
+  ok(
+    requestedUrls.some((u) => u.includes("reputation=true")),
+    "client: reputation requested",
+  );
+  eq(authHeader, "94242579;test-hash", "client: freelancer-auth-v2 header sent");
+
+  // ownerId null — запроса вообще не должно быть.
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return new Response("{}", { status: 200 }); }) as any;
+  eq(await fetchProjectClient(env, null), null, "client: ownerId null -> null");
+  eq(calls, 0, "client: ownerId null -> no request");
 
   globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ status: "success", result: { client: { verification: { payment_verified: false } } } }), { status: 200 })) as any;
-  const sparse = await fetchProjectClient(env, "a/b");
-  eq(sparse && sparse.payment_verified, false, "client: explicit false kept");
-  eq(sparse && sparse.deposit_made, null, "client: missing field null");
-
-  globalThis.fetch = (async () => new Response(JSON.stringify({ status: "success", result: {} }), { status: 200 })) as any;
-  eq(await fetchProjectClient(env, "a/b"), null, "client: no client block -> null");
+    new Response(JSON.stringify({ status: "success", result: {} }), { status: 200 })) as any;
+  eq(await fetchProjectClient(env, 123), null, "client: no users block -> null");
 
   globalThis.fetch = (async () => new Response("nope", { status: 404 })) as any;
-  eq(await fetchProjectClient(env, "a/b"), null, "client: 404 -> null");
+  eq(await fetchProjectClient(env, 123), null, "client: 404 -> null");
 
   globalThis.fetch = (async () => { throw new Error("net down"); }) as any;
-  eq(await fetchProjectClient(env, "a/b"), null, "client: network error -> null");
+  eq(await fetchProjectClient(env, 123), null, "client: network error -> null");
 
   globalThis.fetch = realFetch;
+}
+
+// ---------- L1. mapUsersResponse (чистый маппинг, без сети) ----------
+{
+  const user = (partial: Record<string, unknown>) => ({
+    status: { payment_verified: true },
+    reputation: { entire_history: { rating: 4.5, review_count: 7 } },
+    jobs: [{ id: 33 }],
+    ...partial,
+  });
+  const wrap = (u: unknown) => ({ status: "success", result: { users: { "7": u } } });
+
+  const base = mapUsersResponse(wrap(user({})), 7);
+  eq(base && base.payment_verified, true, "users: payment_verified");
+  eq(base && base.rating, 4.5, "users: rating from entire_history");
+  eq(base && base.review_count, 7, "users: review_count from entire_history");
+  eq(base && base.skill_ids, [33], "users: skill_ids");
+
+  // registration_date строкой тоже принимается.
+  const asStr = mapUsersResponse(wrap(user({ registration_date: "2023-11-14 10:00:00" })), 7);
+  ok(asStr !== null && asStr.registered_ts !== null && asStr.registered_ts > 1_500_000_000, "users: registration_date string parsed");
+
+  // Явные false не теряются, отсутствующие — null.
+  const sparse = mapUsersResponse(
+    wrap({ status: { payment_verified: false }, reputation: null, jobs: null }),
+    7,
+  );
+  eq(sparse && sparse.payment_verified, false, "users: explicit false kept");
+  eq(sparse && sparse.deposit_made, null, "users: missing field null");
+
+  eq(mapUsersResponse({ status: "success", result: {} }, 7), null, "users: no user -> null");
+  eq(mapUsersResponse("garbage", 7), null, "users: garbage -> null");
+}
+
+// ---------- N. лента: parseFeedBody / mapFeedItem ----------
+{
+  const items = [
+    { id: 1, type: "project", time: 100, userId: 55 },
+    { id: 2, type: "contest", time: 200, userId: 66 },
+  ];
+  eq(parseFeedBody({ status: "success", result: items }), items, "feed: конверт {status, result:[…]}");
+  eq(parseFeedBody({ result: { projects: items } }), items, "feed: обёртка result.projects");
+  eq(parseFeedBody(items), items, "feed: голый массив");
+  eq(parseFeedBody({ status: "error" }), [], "feed: мусор -> []");
+  eq(parseFeedBody(null), [], "feed: null -> []");
+
+  eq(mapFeedItem({ id: 1, time: 100, userId: 55 }), { id: 1, time: 100, ownerId: 55, kind: "project" }, "feed item: полный маппинг");
+  eq(mapFeedItem({ id: 1, time: 100 }), { id: 1, time: 100, ownerId: null, kind: "project" }, "feed item: userId отсутствует -> null");
+  eq(mapFeedItem({ id: 1, time: 100, userId: "abc" }), { id: 1, time: 100, ownerId: null, kind: "project" }, "feed item: нечисловой userId -> null");
+  eq(mapFeedItem({ id: "1", time: "100", userId: "55" }), { id: 1, time: 100, ownerId: 55, kind: "project" }, "feed item: строки коерцятся в числа");
+  eq(mapFeedItem({ id: 1, time: 100, type: "contest" })?.kind, "contest", "feed item: contest kind сохраняется");
+  eq(mapFeedItem({ id: "x", time: 100 }), null, "feed item: нечисловой id -> null");
+  eq(mapFeedItem({ id: 1 }), null, "feed item: нет time -> null");
+}
+
+// ---------- N2. публичный поиск: parseSearchBody / fetchSearchOrders ----------
+{
+  const p = [{ id: 1 }];
+  eq(parseSearchBody({ status: "success", result: { projects: p, total_count: 1 } }), p, "search: конверт result.projects");
+  eq(parseSearchBody({ status: "success", result: { projects: [] } }), [], "search: пустые projects -> []");
+  eq(parseSearchBody({ status: "success", result: { total_count: 5 } }), [], "search: нет projects -> []");
+  eq(parseSearchBody({ status: "error" }), [], "search: мусор -> []");
+  eq(parseSearchBody(null), [], "search: null -> []");
+  eq(parseSearchBody([1, 2]), [], "search: голый массив не принимаем (только result.projects)");
+}
+
+async function testSearchChannel() {
+  const realFetch = globalThis.fetch;
+  const store = new Map<string, string>();
+  const env = {
+    FREELANCER_API_BASE: "https://www.freelancer.com/api/projects/0.1",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _opts?: unknown) => void store.set(k, v),
+    },
+  } as any;
+  const now = Math.floor(Date.now() / 1000);
+  const card = (partial: Record<string, unknown>) => ({
+    id: 1,
+    title: "Web app",
+    seo_url: "cat/web-app",
+    type: "fixed",
+    submitdate: now - 100,
+    budget: { minimum: 100, maximum: 500 },
+    currency: { code: "USD", sign: "$", exchange_rate: 1 },
+    bid_stats: { bid_count: 3, bid_avg: 200 },
+    language: "en",
+    owner_info: { id: 4242 },
+    ...partial,
+  });
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    requestedUrls.push(url);
+    return new Response(
+      JSON.stringify({
+        status: "success",
+        result: {
+          projects: [
+            card({}),
+            card({ id: 2, submitdate: now - 1000 }), // ниже bootstrap-курсора
+            card({ id: 3, type: "contest" }), // контест — не fixed/hourly
+            card({ id: 4, language: "ru" }), // не-английский
+            card({ id: 5, owner_info: { user_id: 777 } }), // альтернативный ключ owner
+          ],
+          total_count: 5,
+        },
+      }),
+      { status: 200 },
+    );
+  }) as any;
+
+  const r = await fetchSearchOrders(env);
+  eq(r.error, null, "search: канал без ошибок");
+  eq(r.orders.length, 2, "search: старый/контест/не-en отфильтрованы");
+  eq(r.orders[0] && r.orders[0].id, 1, "search: id сохранён");
+  eq(r.orders[0] && r.orders[0].title, "Web app", "search: карточка нормализована");
+  eq(r.orders[0] && r.orders[0].owner_id, 4242, "search: owner_id из owner_info.id");
+  eq(r.orders[1] && r.orders[1].owner_id, 777, "search: owner_id из owner_info.user_id");
+  ok(requestedUrls.length === 1, "search: один запрос за тик (throttle)");
+  ok(
+    requestedUrls[0].includes("/api/projects/0.1/projects/active"),
+    "search: endpoint projects/active (без двойного api/...)",
+  );
+  ok(store.has("search:last_submit"), "search: курсор записан");
+  ok(store.has("search:last_fetch"), "search: throttle записан");
+
+  // Throttle: повторный вызов в том же тике — skipped, запроса нет.
+  const again = await fetchSearchOrders(env);
+  eq(again.skipped, true, "search: повторный вызов throttled");
+  eq(requestedUrls.length, 1, "search: throttled без запроса");
+
+  // Ошибка канала: сеть падает — ошибка возвращается, имя канала в сообщении.
+  store.clear();
+  globalThis.fetch = (async () => { throw new Error("net down"); }) as any;
+  const down = await fetchSearchOrders(env);
+  ok(down.error !== null && down.error.includes("search"), "search: ошибка сети -> error с именем канала");
+
+  globalThis.fetch = realFetch;
+}
+
+// ---------- O. карточка: mapCardToProject (shim active_prepaid_milestone) ----------
+{
+  const milestone = { project_id: 1, amount: 100 };
+  const card = {
+    id: 1,
+    title: "T",
+    seo_url: "cat/t",
+    type: "fixed",
+    submitdate: 123,
+    budget: { minimum: 100, maximum: 200 },
+    currency: { code: "USD", sign: "$", exchange_rate: 1 },
+    upgrades: { featured: true, active_prepaid_milestone: milestone },
+  };
+  const p = mapCardToProject(card);
+  ok(p !== null, "card: валидная карточка -> проект");
+  ok(p && p.id === 1, "card: id сохранён");
+  ok(p && p.title === "T" && p.type === "fixed", "card: поля совместимы с FreelancerProject");
+  ok(
+    p && JSON.stringify(p.active_prepaid_milestone) === JSON.stringify(milestone),
+    "card: prepaid milestone поднят в верхний уровень (normalizeProject ждёт там)",
+  );
+  eq(mapCardToProject({ title: "нет id" }), null, "card: без id -> null");
+  eq(mapCardToProject(null), null, "card: null -> null");
 }
 
 // ---------- L2. fetchPortfolio (mock fetch + mock KV) ----------
@@ -402,8 +605,11 @@ async function testPortfolio() {
       put: async (k: string, v: string) => void store.set(k, v),
     },
     FL_USER_ID: "94242579",
+    FL_AUTH_HASH: "test-hash",
   } as any;
   const item = (id: number, title: string, description: string) => ({ id, user_id: 94242579, title, description });
+  const usernameBody = () =>
+    new Response(JSON.stringify({ status: "success", result: { users: { "94242579": { username: "gleb7499" } } } }), { status: 200 });
 
   // 1) полный ответ: portfolios + username
   globalThis.fetch = (async (url: string) => {
@@ -412,7 +618,7 @@ async function testPortfolio() {
         JSON.stringify({ status: "success", result: { portfolios: { 94242579: [item(1, "Proj A", "desc A"), item(2, "Proj B", "x".repeat(900))] } } }),
         { status: 200 });
     }
-    return new Response(JSON.stringify({ status: "success", result: { username: "gleb7499" } }), { status: 200 });
+    return usernameBody();
   }) as any;
   const p1 = await fetchPortfolio(env);
   eq(p1 && p1.items.length, 2, "portfolio: 2 items parsed");
@@ -660,6 +866,7 @@ async function testConcurrencyPool() {
   await testOrderContext();
   await testConcurrencyPool();
   await testSponsoredDaily();
+  await testSearchChannel();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

@@ -13,26 +13,91 @@
 | Develop API (закрытые точки) | `Authorization: Bearer <FL_API_KEY>` (тот же ключ работает и как `Freelancer-OAuth-V1`) | `bids` GET/POST, `PUT bids/{id}/`, `milestone_requests`, `milestones`, `portfolios` |
 | OAuth аккаунта | `Freelancer-OAuth-V1: <FL_OAUTH_TOKEN>` (предпочтителен, когда задан) | то же; в проде секрета нет, рабочая схема — Bearer-ключ |
 | Пользовательский OAuth1-токен | тот же заголовок `Freelancer-OAuth-V1: <user token>` | то же (проверено 07.10.2026, аккаунт gleb7499 / 94242579); анонимизацию флагов/owner_id НЕ снимает |
-| Веб-авторизация | заголовок `freelancer-auth-v2: <FL_USER_ID>;<FL_AUTH_HASH>` + `freelancer-app-name: main`, `freelancer-app-platform: web`; горячая замена через KV `fl:auth` (эндпоинт `/admin/fl-auth`) | `ajax-api/projects/getBidLimit.php` (баланс bids) |
+| Веб-авторизация | заголовок `freelancer-auth-v2: <FL_USER_ID>;<FL_AUTH_HASH>` + `freelancer-app-name: main`, `freelancer-app-platform: web`; горячая замена через KV `fl:auth` (эндпоинт `/admin/fl-auth`) | `ajax-api/projects/getBidLimit.php` (баланс bids), **лента** `ajax-api/navigation/project-feed/pre-populated.php`, **карточка** `projects/0.1/projects?projects[]=`, **заказчик** `users/0.1/users?users[]=`, **портфолио** `users/0.1/portfolios/` (всё без кук, проверено 07.10.2026) |
 
 Секреты: `FL_API_KEY` — прод-секрет и `--var` для локального `wrangler dev`
 (в `.dev.vars` локально OAuth-токена нет — Bearer-ключ единственный путь).
 Ключ Develop API действует от лица аккаунта (владелец ключа = пользователь).
 
+## Закрытый веб-API (freelancer-auth-v2) — intake и enrich
+
+> Исследование Gleb 07.10.2026: все точки ниже работают **без кук**, только с
+> заголовком `freelancer-auth-v2: <userId>;<hash>` (+ `freelancer-app-name:
+> main`, `freelancer-app-platform: web`, `accept: application/json`, браузерный
+> User-Agent). Протухание авторизации: HTTP 401 или тело
+> `{error:{code:"UNAUTHORIZED"}}`. С 08.10.2026 это основной закрытый канал
+> мониторинга и обогащения (наряду с открытым поиском `projects/active`, см.
+> раздел «Проекты» ниже — оставлен как справка по открытым точкам).
+
+### `GET /ajax-api/navigation/project-feed/pre-populated.php` — лента новых заказов
+
+Параметры: `jobIds[]=<11 скиллов>&fromWebapp=true&compact=true&new_errors=true&new_pools=true`.
+Конверт: `{status:"success", isValidAgainstSchema:true, result:[элемент×10]}`.
+Поля элемента: `id, type("project"|"contest"), userId (owner_id!), time (unix
+sec), submitDate ("YYYY-MM-DD HH:MM:SS"), title, text, userName, jobString,
+linkUrl, minbudget, maxbudget, currency (символ), currencyCode, exchangerate,
+projIsHourly, urgent, featured, fulltime, nda, hidebids, recruiter, listed,
+imgUrl, nonpublic, free_bid_until`. Конкурсы (`type:"contest"`) пропускаем.
+Окно выдачи ~2.5 ч (10 элементов) — при 30-с тиках пропусков нет; курсор по
+`time`, bootstrap now-300 с.
+
+### `GET /api/projects/0.1/projects?projects[]=<id>` — карточка по id (дозаполнение)
+
+Параметры: `full_description=true&upgrade_details=true&job_details=true&
+owner_info=true&attachment_details=true&webapp=1&compact=true&new_errors=true&
+new_pools=true`. Конверт: `{status:"success", result:{projects:[{…41 поле…}]}}`.
+Поля совместимы с интерфейсом `FreelancerProject` (parser.ts). **Отличие от
+публичной точки:** `active_prepaid_milestone` лежит ВНУТРИ `upgrades` —
+`mapCardToProject` поднимает его в верхний уровень (`normalizeProject` ждёт
+его там). Отдельный запрос с `owners[]=<owner_id>&limit=10` отдаёт другие
+заказы заказчика.
+
+### `GET /api/users/0.1/users?users[]=<owner_id>` — данные заказчика
+
+Параметры: `reputation=true&employer_reputation=true&jobs=true&status=true&
+country_details=true&avatar=true&webapp=1&compact=true&new_errors=true&
+new_pools=true`. Конверт: `result.users["<id>"]`:
+- `status` — verification-флаги (`payment_verified, email_verified,
+  deposit_made, identity_verified, phone_verified, …`);
+- `reputation.entire_history` — рейтинг и число отзывов (имена полей
+  защищённо проверяем несколькими вариантами);
+- `jobs[{id,name,category}]` — скиллы заказчика (здесь крипто-скилл 2658);
+- `registration_date` — unix или строка, оба принимаются;
+- `location{country,…}`.
+
+Тот же URL с `usernames[]=<name>` ищет по имени; `users[]=<id>` с
+`status=true` отдаёт и `username` (используется для ссылок на портфолио).
+
+### `GET /api/users/0.1/portfolios/` — портфолио ( enrich )
+
+Параметры: `limit=12&users[]=<my_id>&featured=false&exclude_empty_items=true&
+webapp=1&compact=true&new_errors=true&new_pools=true` →
+`result.portfolios[<id>]`.
+
 ## Проекты
 
-### `GET /api/projects/0.1/projects/active/` — intake-канал (открытая)
+### `GET /api/projects/0.1/projects/active` — второй intake-канал (открытая)
 
-Параметры: `jobs[]` (11 скиллов), `project_types[]=fixed|hourly`,
-`languages[]=en`, `sort_field=submitdate`, `limit`, `full_description=true`,
-`compact=true`.
+> С 08.10.2026 — второй канал мониторинга (вместе с лентой закрытого веб-API,
+> см. выше). Точка публичная: без `freelancer-auth-v2` и без кук отдаёт 200 и
+> полный JSON (тот запрос, что делает страница поиска фронта; исследование
+> Gleb 08.10.2026). Заголовки — только браузерный User-Agent.
 
-Курсор — по `submitdate` (unix sec), строго `>`. Компакт-ответ содержит поля:
-`id,title,status,seo_url,currency,description,submitdate,type,bidperiod,budget,
-bid_stats,upgrades,language,hidebids,is_escrow_project,is_seller_kyc_required,
-time_free_bids_expire,…`.
-**Отсутствует:** `owner_id` (анонимно всегда null), `jobs`/скиллы,
-настоящие флаги ограничений.
+Параметры (как у фронта): `limit=20&full_description=true&job_details=true&
+upgrade_details=true&owner_info=true&jobs[]=<11 скиллов>&languages[]=en&
+project_types[]=hourly&project_types[]=fixed&sort_field=submitdate&webapp=1&
+compact=true&new_errors=true&new_pools=true`.
+
+Конверт: `{status:"success", result:{projects:[…], total_count}}`, сортировка
+`submitdate` DESC (свежие первые). Элементы — ПОЛНЫЕ карточки (37 полей:
+`id,title,seo_url,currency,description,submitdate,type(fixed|hourly),bidperiod,
+budget{minimum,maximum},bid_stats{bid_count,bid_avg},upgrades,language,location,
+is_seller_kyc_required,owner_info{…},time_free_bids_expire,…`) — дозаполнение
+по id не нужно. `owner_id` берём из `owner_info.id ?? user_id ?? owner_id`
+(анонимный `owner_id` карточки по-прежнему null).
+
+Курсор по `submitdate` (unix sec, строго `>`), bootstrap now-300 с, throttle
+10 с — по образцу ленты (KV `search:last_submit`/`search:last_fetch`).
 
 ### Анонимизация и ограничения (важно)
 
@@ -55,6 +120,9 @@ time_free_bids_expire,…`.
 `nda_details, requires_upfront_funding, qualifications, …`. `jobs` — null.
 
 ### `GET /api/projects/0.1/projects/seo?seo_url=<slug>&webapp=1&compact=true` (открытая)
+
+> **Заменена (08.10.2026):** данные заказчика теперь берутся из закрытой точки
+> `users/0.1/users?users[]=<owner_id>` (см. выше). Оставлено как справка.
 
 `seo_url` — полный slug с категорией: `mongodb/Urgent-Express-Web-App-Support`.
 Голый slug без категории → `GAF_EXCEPTION` «resource does not exist»

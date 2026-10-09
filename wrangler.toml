@@ -2,6 +2,12 @@ name = "freelancer-monitor"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 
+# Промты — только в файлах prompts/*.md (см. AGENT.md), импортируются как текст.
+[[rules]]
+type = "Text"
+globs = [ "**/*.md" ]
+fallthrough = true
+
 [[kv_namespaces]]
 binding = "ORDERS_KV"
 id = "b629829e784842d3a9c78f612f689974"
