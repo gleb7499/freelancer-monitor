@@ -150,11 +150,6 @@ export function formatOrderCard(
       const slot = ma.slotFree === null ? "не проверен" : ma.slotFree ? "свободен" : "занят";
       lines.push(`2. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
     }
-    if (ma.bidId !== null) {
-      lines.push(`🔗 https://www.freelancer.com/bid/${ma.bidId}`);
-    } else if (ma.test) {
-      lines[lines.length - 1] += " (test: ставка не размещена, ссылки нет)";
-    }
     parts.push(lines.join("\n"));
   }
 
