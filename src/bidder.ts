@@ -1,20 +1,47 @@
 import type { Env, Order, ScoreResult } from "./types";
-import { getConfig, type Config } from "./config";
+import { getConfig } from "./config";
 import { recordBidSpent } from "./bids-balance";
 import { getMode } from "./mode";
+import { resolveWebAuth, webAuthHeaders, type WebAuth } from "./web-auth";
+import { buySealedUpgrade } from "./payments";
 
 export interface BidResult {
   placed: boolean;
   bidId?: number;
   reason?: string;
+  // Запросы этапов после ставки: requested — число созданных запросов,
+  // failed — текст ошибки первого сбоя (ставку не отменяет) или null.
+  milestones?: { requested: number; failed: string | null };
   // Покупка sealed после ставки: "ok" | null (не покупали) | код ошибки.
   sealPurchase?: string | null;
 }
 
-// Разместить ставку через официальный API.
-// Валюта amount: API ждёт сумму в валюте проекта. score.bid_amount уже хранится
-// в родной валюте заказа (LLM предлагает сумму в currency_code, код нормализует) —
-// пересчёт не нужен, отправляем как есть.
+// Собрать тело ставки отдельно — приёмочные проверки используют напрямую.
+export function buildBidBody(
+  orderId: number,
+  bidderId: number,
+  bidText: string,
+  score: ScoreResult,
+): Record<string, unknown> {
+  return {
+    project_id: orderId,
+    bidder_id: bidderId,
+    description: bidText,
+    amount: score.bid_amount,
+    period: score.delivery_days,
+    // Константа фронта при наличии этапов (не менее 2); 100 — hourly и
+    // мелкий fixed с одним этапом (score.milestones === null).
+    milestone_percentage:
+      score.milestones !== null && score.milestones.length >= 2 ? 50 : 100,
+    showcases: [],
+  };
+}
+
+// Разместить ставку. Основной путь — веб-авторизация freelancer-auth-v2
+// (доказана живой ставкой; официальный API с Bearer-ключом ставку ни разу
+// не поставил). Фолбэк при отсутствии веб-сессии — старые OAuth/Bearer.
+// Валюта amount: score.bid_amount уже в родной валюте заказа — отправляем
+// как есть; суммы этапов из score.milestones согласованы с ней скорингом.
 
 export async function placeBid(
   env: Env,
@@ -37,25 +64,30 @@ export async function placeBid(
     return { placed: false, reason: "test-mode" };
   }
 
-  // live-режим без токенов — алертим через reason, не падаем.
-  // Основной путь — OAuth-токен аккаунта; фолбэк — ключ Develop API
-  // (Authorization: Bearer, проверено 04.10.2026).
   const cfg = getConfig(env);
-  const authHeaders: Record<string, string> | null = cfg.flOauthToken
-    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
-    : cfg.flApiKey
-      ? { Authorization: `Bearer ${cfg.flApiKey}` }
-      : null;
-  if (!authHeaders) {
+  const webAuth = await resolveWebAuth(env);
+  // Фолбэк — только когда веб-сессии нет вообще.
+  const fallbackHeaders: Record<string, string> | null = webAuth
+    ? null
+    : cfg.flOauthToken
+      ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
+      : cfg.flApiKey
+        ? { Authorization: `Bearer ${cfg.flApiKey}` }
+        : null;
+  if (!webAuth && !fallbackHeaders) {
     console.error("bidder.oauth-missing", { id: order.id });
     return { placed: false, reason: "oauth-missing" };
   }
-  if (!cfg.flUserId) {
+  if (!webAuth && !cfg.flUserId) {
     console.error("bidder.fl-user-id-missing", { id: order.id });
     return { placed: false, reason: "fl-user-id-missing" };
   }
   if (!bidText || bidText.trim() === "") {
     return { placed: false, reason: "empty-bid-text" };
+  }
+  // Сервер отвечает 500 на описание короче 100 символов — не тратим запрос.
+  if (bidText.trim().length < 100) {
+    return { placed: false, reason: "bid-text-too-short" };
   }
   // Проекты с бейджем RECRUITER — только для Preferred Freelancer; наш аккаунт
   // им не является, API отклонил бы ставку (403). Не тратим запрос.
@@ -64,37 +96,26 @@ export async function placeBid(
   }
 
   // Конкуренцию оценивает скоринг (фактор, не вето; см. prompts/scoring-system.md).
-  // Ранее здесь был preflight: свежий bid_count > 50 отменял ставку. Снят:
-  // после перевода enrich на веб-авторизацию authenticated-выдача стала
-  // возвращать счётчик, отличный от публичного (0/36 на карточке против >50
-  // в preflight), — метрика перестала быть сопоставимой с тем, что видел
-  // скоринг, и preflight стал системно резать обоснованные BID-вердикты,
-  // сжигая на них LLM-квоту. Ранк Freelancer не хронологический — поздняя
-  // ставка не мёртвая; ставка стоит регенерируемый bid.
+  // Ранее здесь был preflight на bid_count — снят (подробности в истории git).
 
-  // Этапная оплата: ВСЕГДА на fixed, стартовый этап 30% (полный план —
-  // score.milestone_plan, 30/70, 30/30/40 или 30/30/30/10; rest через
-  // milestone_requests после назначения). Hourly — без этапов.
-  const milestonePercentage = order.type === "fixed" ? 30 : 100;
+  const authHeaders = webAuth
+    ? webAuthHeaders(webAuth)
+    : (fallbackHeaders as Record<string, string>);
+  const bidderId = Number(webAuth?.userId ?? cfg.flUserId);
+  const body = buildBidBody(order.id, bidderId, bidText, score);
 
-  const body = {
-    project_id: order.id,
-    bidder_id: Number(cfg.flUserId),
-    description: bidText,
-    amount: score.bid_amount,
-    period: score.delivery_days,
-    milestone_percentage: milestonePercentage,
-  };
-
-  const res = await fetch(`${cfg.freelancerBase}/bids/`, {
-    method: "POST",
-    headers: {
-      ...authHeaders,
-      "Content-Type": "application/json",
+  const res = await fetch(
+    `${cfg.freelancerBase}/bids/?compact=true&new_errors=true&new_pools=true`,
+    {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
     },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20000),
-  });
+  );
 
   if (res.ok) {
     let bidId: number | undefined;
@@ -104,35 +125,44 @@ export async function placeBid(
     } catch {
       // id не критичен
     }
-    // План этапов и покупка апгрейдов — после успешной ставки.
+    // Запросы этапов и покупка sealed — после успешной ставки.
+    let milestones: { requested: number; failed: string | null } = {
+      requested: 0,
+      failed: null,
+    };
     let sealPurchase: string | null = null;
     if (bidId !== undefined) {
-      try {
-        await env.ORDERS_KV.put(
-          `ms:plan:${bidId}`,
-          JSON.stringify({ plan: score.milestone_plan ?? [30, 70], ts: Date.now() }),
-          { expirationTtl: 60 * 86400 },
+      if (score.milestones !== null) {
+        milestones = await requestMilestones(
+          env,
+          cfg.freelancerBase,
+          authHeaders,
+          order.id,
+          bidId,
+          score,
         );
-      } catch {
-        // план не сохранился — milestones.ts fallback на [30, 70]
       }
-      if (score.take_upgrades.includes("sealed") && !order.hidebids) {
-        sealPurchase = await buyBidUpgrade(cfg, bidId, "seal");
-        if (sealPurchase !== "ok") {
-          console.warn("bidder.seal-failed", { id: order.id, bidId, reason: sealPurchase });
-        } else {
-          sealPurchase = "ok";
-        }
+      // Sealed покупается только с веб-авторизацией (корзина платежей).
+      sealPurchase = webAuth
+        ? await buySealedUpgrade(webAuth, bidId, order.id)
+        : "no-web-auth";
+      if (sealPurchase !== "ok") {
+        console.warn("bidder.seal-failed", { id: order.id, bidId, reason: sealPurchase });
       }
     }
     await recordBidSpent(env, `bid:${order.id}`);
-    console.log("bidder.placed", { id: order.id, bidId });
-    return { placed: true, bidId, sealPurchase };
+    console.log("bidder.placed", {
+      id: order.id,
+      bidId,
+      milestones: milestones.requested,
+      seal: sealPurchase,
+    });
+    return { placed: true, bidId, milestones, sealPurchase };
   }
 
   const text = (await res.text()).slice(0, 300);
   // Текст ошибки API для карточки: только безопасные ASCII-символы (заголовок
-  // уходит в Telegram с HTML-parse, латиница без разметки).
+  // уходит в Telegram с HTML-разметкой, латиница без разметки).
   const apiMessage = (() => {
     try {
       const m = (JSON.parse(text) as { message?: unknown }).message;
@@ -173,36 +203,49 @@ export async function placeBid(
   return { placed: false, reason: `http-${res.status}${apiMessage ? `: ${apiMessage}` : ""}` };
 }
 
-// Покупка апгрейда существующей ставки: PUT /bids/{id}/ action=seal|sponsor.
-// Проверено 05.10.2026: sealed через API требует Preferred Freelancer Program
-// (USER_NOT_IN_PFP), хотя веб-форма предлагает его за $0.10 — покупка может
-// не пройти; sponsored требует amount, семантика суммы не до конца ясна
-// (см. AGENT.md), поэтому автоматом покупаем только sealed.
-export async function buyBidUpgrade(
-  cfg: Config,
+// Запросы этапов: отдельная сущность, не часть тела ставки. На каждый элемент
+// score.milestones — один POST. Сумма этапа ≡ сумме ставки (гарантирует скоринг).
+// Созданные запросы сохраняются в KV ms:req:<bidId> (TTL 60 дней) для
+// milestones.ts. Ошибка одного запроса не отменяет остальные и ставку.
+async function requestMilestones(
+  env: Env,
+  freelancerBase: string,
+  authHeaders: Record<string, string>,
+  projectId: number,
   bidId: number,
-  action: "seal" | "sponsor",
-): Promise<"ok" | string> {
-  try {
-    const res = await fetch(`${cfg.freelancerBase.replace(/\/+$/, "")}/bids/${bidId}/`, {
-      method: "PUT",
-      headers: {
-        ...(cfg.flOauthToken
-          ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
-          : { Authorization: `Bearer ${cfg.flApiKey}` }),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (res.ok) return "ok";
-    const text = (await res.text()).slice(0, 200);
+  score: ScoreResult,
+): Promise<{ requested: number; failed: string | null }> {
+  const requests: { id: number; amount: number; description: string }[] = [];
+  let failed: string | null = null;
+  for (const m of score.milestones ?? []) {
     try {
-      return (JSON.parse(text) as { error_code?: string }).error_code ?? `http-${res.status}`;
-    } catch {
-      return `http-${res.status}`;
+      const res = await fetch(
+        `${freelancerBase}/milestone_requests/?webapp=1&compact=true&new_errors=true&new_pools=true`,
+        {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, bid_id: bidId, description: m.description, amount: m.amount }),
+          signal: AbortSignal.timeout(15000),
+        },
+      );
+      if (!res.ok) {
+        if (failed === null) failed = `http-${res.status}`;
+        continue;
+      }
+      const id = ((await res.json()) as { result?: { id?: number } }).result?.id;
+      requests.push({ id: id ?? 0, amount: m.amount, description: m.description });
+    } catch (e) {
+      if (failed === null) failed = String(e).slice(0, 100);
     }
-  } catch (e) {
-    return String(e).slice(0, 100);
   }
+  try {
+    await env.ORDERS_KV.put(
+      `ms:req:${bidId}`,
+      JSON.stringify({ project_id: projectId, requests, ts: Date.now() }),
+      { expirationTtl: 60 * 86400 },
+    );
+  } catch {
+    // запросы не сохранились — не критично
+  }
+  return { requested: requests.length, failed };
 }

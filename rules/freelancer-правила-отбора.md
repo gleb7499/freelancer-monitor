@@ -89,13 +89,23 @@ LLM оценивает **только** целесообразность цен�
 только при полной оплате через milestone-систему; досрочный релиз +
 жалоба клиента штрафуют ранг.
 
-Схема фиксирована кодом (поле `milestone_plan`), LLM озвучивает её в тексте:
+План этапов (поле `milestones`) заполняешь ТЫ при скоринге — код его не
+фиксирует, а только пересчитывает суммы от итоговой ставки:
 
-- первый этап — ВСЕГДА 30% (зашито в саму ставку);
-- остальное по размеру ставки: < $200 → 30/70 (2 этапа);
-  $200–1000 → 30/30/40 (3); > $1000 → 30/30/30/10 (4). Кап — 4 этапа.
-- остальные этапы создаются запросами после назначения; следующий
-  запрашивается, когда предыдущий выпущен (Released) — не раньше.
+- первый этап — ВСЕГДА 30% (предоплата перед стартом);
+- число и доли остальных этапов выбираешь сам: 2–4 крупных ГЛОБАЛЬНЫХ
+  этапа (уровень «Project setup» / «Core implementation» /
+  «Final delivery and handover»), НЕ детальный план работ — точные границы
+  выполнения на момент ставки неизвестны;
+- описание этапа — английским, 10–250 символов (платформа проверяет и
+  фронт, и сервер); доли целые, сумма строго 100;
+- мелкие заказы (< ~$100 net) — `null`: один этап по приёмке, без
+  предоплаты; hourly-проекты — всегда `null` (этапов нет).
+
+Все этапы создаются запросами СРАЗУ после ставки (POST milestone_requests —
+заказчик видит структуру оплаты вместе с откликом, это фактор ранжирования);
+дальнейший релиз — только по факту готовности: досрочный релиз + жалоба
+клиента штрафуют ранг.
 
 ### 2. Стек
 
@@ -182,12 +192,29 @@ GET https://www.freelancer.com/api/projects/0.1/projects/active/
 - Автосабмит ставок: официальный bids API с OAuth — допустим по ToS при
   использовании официального API.
 
-## Ставка через официальный API
+## Ставка через скрытый веб-API
+
+Ставки идут через тот же веб-API, что фронт платформы, с заголовком
+`freelancer-auth-v2` (веб-сессия из KV `fl:auth`; официальный bids API с
+OAuth/Bearer ставку не поставил — проверено).
 
 ```
-POST https://www.freelancer.com/api/projects/0.1/bids/
-Headers: Freelancer-OAuth-V1: <token>, Content-Type: application/json
-Body: {project_id, bidder_id, description, amount, period, milestone_percentage}
+POST https://www.freelancer.com/api/projects/0.1/bids/?compact=true&new_errors=true&new_pools=true
+Headers: freelancer-auth-v2: <userId>;<hash>, Content-Type: application/json
+Body: {project_id, bidder_id, description, amount, period, milestone_percentage, showcases}
 ```
 
-`amount` — в валюте проекта; `period` — дни; `milestone_percentage` — 100.
+`amount` — в валюте проекта; `period` — дни; `bidder_id` — id из
+веб-авторизации; `showcases` — всегда `[]`; `milestone_percentage` — 50 при
+плане из 2+ этапов (константа фронта), 100 при одном этапе (мелкий fixed) и
+hourly. Описание короче 100 символов — сервер отвечает 500 (режем до запроса).
+
+Этапы — отдельные запросы сразу после ставки (по одному на этап):
+`POST .../milestone_requests/` с `{project_id, bid_id, description, amount}`;
+сумма этапов ≡ сумме ставки (согласует скоринг).
+
+Апгрейды покупаются отдельно: sealed — кодом ВСЕГДА, через корзину платежей
+`POST /api/payments/0.1/carts/` → `POST .../carts/<id>/cart_items/`
+(`context_type: "bid_upgrade"`, `context_sub_type: 3` = sealed, $0.10, USD)
+→ `PUT .../carts/<id>` `{action: "process"}` (списание — на третьем шаге);
+sponsored — ручная покупка по выбору скоринга.

@@ -13,7 +13,7 @@
 | Develop API (закрытые точки) | `Authorization: Bearer <FL_API_KEY>` (тот же ключ работает и как `Freelancer-OAuth-V1`) | `bids` GET/POST, `PUT bids/{id}/`, `milestone_requests`, `milestones`, `portfolios` |
 | OAuth аккаунта | `Freelancer-OAuth-V1: <FL_OAUTH_TOKEN>` (предпочтителен, когда задан) | то же; в проде секрета нет, рабочая схема — Bearer-ключ |
 | Пользовательский OAuth1-токен | тот же заголовок `Freelancer-OAuth-V1: <user token>` | то же (проверено 07.10.2026, аккаунт gleb7499 / 94242579); анонимизацию флагов/owner_id НЕ снимает |
-| Веб-авторизация | заголовок `freelancer-auth-v2: <FL_USER_ID>;<FL_AUTH_HASH>` + `freelancer-app-name: main`, `freelancer-app-platform: web`; горячая замена через KV `fl:auth` (эндпоинт `/admin/fl-auth`) | `ajax-api/projects/getBidLimit.php` (баланс bids), **лента** `ajax-api/navigation/project-feed/pre-populated.php`, **карточка** `projects/0.1/projects?projects[]=`, **заказчик** `users/0.1/users?users[]=`, **портфолио** `users/0.1/portfolios/` (всё без кук, проверено 07.10.2026) |
+| Веб-авторизация | заголовок `freelancer-auth-v2: <FL_USER_ID>;<FL_AUTH_HASH>` + `freelancer-app-name: main`, `freelancer-app-platform: web`; горячая замена через KV `fl:auth` (эндпоинт `/admin/fl-auth`) | `ajax-api/projects/getBidLimit.php` (баланс bids), **лента** `ajax-api/navigation/project-feed/pre-populated.php`, **карточка** `projects/0.1/projects?projects[]=`, **заказчик** `users/0.1/users?users[]=`, **портфолио** `users/0.1/portfolios/` (всё без кук, проверено 07.10.2026); **ставки** `POST projects/0.1/bids/`, **этапные запросы** `milestone_requests`, **корзина платежей** `payments/0.1/carts/` (проверено живой ставкой 09.10.2026, bid 496321109 — см. разделы «Ставки» и «Этапные платежи») |
 
 Секреты: `FL_API_KEY` — прод-секрет и `--var` для локального `wrangler dev`
 (в `.dev.vars` локально OAuth-токена нет — Bearer-ключ единственный путь).
@@ -73,6 +73,48 @@ new_pools=true`. Конверт: `result.users["<id>"]`:
 Параметры: `limit=12&users[]=<my_id>&featured=false&exclude_empty_items=true&
 webapp=1&compact=true&new_errors=true&new_pools=true` →
 `result.portfolios[<id>]`.
+
+## Ставки, этапы и корзина через веб-API (проверено живой ставкой 09.10.2026)
+
+> Эксперимент Gleb'а 09.10.2026: реальная live-ставка bid **496321109** на проект
+> **40758567** (этапы 3000/4000 INR). Всё ниже работает с заголовком
+> `freelancer-auth-v2` **без кук и без XSRF** — только заголовок. Это основной
+> путь постановки ставок (bidder.ts); Develop API (Bearer/OAuth) реальной
+> постановкой не подтверждён.
+
+### `POST /api/projects/0.1/bids/?compact=true&new_errors=true&new_pools=true` — размещение ставки
+
+Тело: `{project_id, bidder_id, amount, period, milestone_percentage,
+description, showcases: []}`. `amount` — в валюте проекта.
+`milestone_percentage` — **константа фронта**: 50 при 2+ этапах / 100 иначе
+(не доля первого этапа — фронт шлёт 50 всегда, когда этапов больше одного).
+`description` короче 100 символов → HTTP 500 (гвард в коде:
+`bid-text-too-short`). Ответ: `{result:{id}}` — id ставки.
+
+### `POST /api/projects/0.1/milestone_requests/?webapp=1&compact=true&new_errors=true&new_pools=true` — этапные запросы
+
+Тело: `{project_id, bid_id, description, amount}` — по одному запросу на каждый
+этап плана (2–4 шт.), сумма этапов ≤ сумме ставки. Все запросы уходят **сразу
+после ставки** (bidder.ts), идентификаторы хранятся в KV `ms:req:<bidId>`.
+Чтение: `GET …/milestone_requests/?bids[]=<bid_id>` — элементы с полями
+`id, bid_id, amount, status, is_initial_payment, …` (конверт словарь или
+список). Запрос создаётся **даже без назначения** (status pending).
+
+### Корзина платежей — покупка Sealed ($0.10)
+
+База отдельная: `https://www.freelancer.com/api/payments/0.1`. Три шага
+(payments.ts, `buySealedUpgrade`):
+
+1. `POST /carts/` — создать корзину;
+2. `POST /carts/{id}/cart_items/` — позиция `{context_type:"bid_upgrade",
+   context_sub_type:3, currency:1, amount:0.1, …}`;
+3. `PUT /carts/{id}` `{action:"process"}` — **списание на третьем шаге**.
+
+Константы: `currency` USD = 1 (живой ответ `GET projects/0.1/currencies`,
+id=1); `context_sub_type` из enum JS-бандла фронта: sponsored=1, highlight=2,
+sealed=3. Работает ТОЛЬКО с веб-авторизацией (OAuth/Bearer не принимаются);
+при OAuth-фолбэке ставки Sealed не покупается. Повторная покупка купленного
+sealed — бесплатный no-op.
 
 ## Проекты
 
@@ -142,11 +184,16 @@ is_seller_kyc_required,owner_info{…},time_free_bids_expire,…`) — доза�
 
 ## Ставки (bids)
 
-### `POST /api/projects/0.1/bids/` (закрытая)
+> **Основной путь — веб-API** (см. раздел «Ставки, этапы и корзина через
+> веб-API» выше): живой ставкой 09.10.2026 подтверждены `POST bids/` и корзина
+> платежей. Раздел ниже — справка по Develop API (Bearer/OAuth); реальной
+> постановкой ставки через него не подтверждён.
+
+### `POST /api/projects/0.1/bids/` (закрытая, Develop API)
 
 Body JSON: `{project_id, bidder_id, description, amount, period,
 milestone_percentage}`. `amount` — в валюте проекта; `milestone_percentage` —
-доля ПЕРВОГО этапа (30 = стартовый этап 30%).
+доля ПЕРВОГО этапа (в веб-пути фронт шлёт константу 50 при 2+ этапах / 100).
 
 **Полный список полей публичного API** (источники: официальный Python-SDK
 `place_project_bid` и современный Go-SDK `CreateBidBody`, 07.10.2026):
@@ -219,8 +266,9 @@ highlight, retract, revoke, accept, award`. `reject` — недопустимо�
 
 - `action=seal` → 400 `USER_NOT_IN_PFP` («You are not in the Preferred
   Freelancer Program») — API-покупка sealed требует PFP, хотя веб-форма
-  предлагает sealed за $0.10. Автопокупка реализована, но скорее всего
-  отклоняется.
+  предлагает sealed за $0.10. **Путь заменён корзиной платежей** (веб-API,
+  проверено живой покупкой 09.10.2026 — см. выше); автопокупка sealed живёт в
+  `payments.ts` и работает всегда, без PFP.
 - `action=sponsor` требует дополнительно `amount`; семантика суммы НЕ ясна
   (`amount=2` → «Bid cannot be less than 600»). Автопокупка sponsored
   **отключена** до ручной проверки Gleb'ом на сайте.
@@ -242,10 +290,11 @@ milestone-систему**. Ограничения «заказ дешевле X
 
 ### Эндпоинты (проверены)
 
-- `POST /projects/0.1/milestone_requests/` `{project_id, bid_id, amount,
-  description}` — создаёт запрос **даже до назначения** (status pending).
-  Многоэтапность: несколько запросов последовательно; следующий — когда
-  предыдущий Released.
+- **Основной путь — веб-API** (см. раздел выше): `POST
+  /projects/0.1/milestone_requests/?webapp=1&compact=true…` — все этапы сразу
+  после ставки; чтение `GET …/milestone_requests/?bids[]=<bid_id>`.
+- Develop API: `POST /projects/0.1/milestone_requests/` `{project_id, bid_id,
+  amount, description}` — создаёт запрос **даже до назначения** (status pending).
 - `GET /projects/0.1/milestone_requests/?users[]=<id>` и
   `?milestone_requests[]=<id>` — список/карточка запроса с `status`.
 - Отмена запроса: `PUT /projects/0.1/milestone_requests/{id}/` body
@@ -286,7 +335,7 @@ account_balances, membership_package, badges` есть в схеме ответ�
 
 | Апгрейд | Цена | Механика |
 | --- | --- | --- |
-| sealed | стабильно $0.10 | через API требует PFP (см. PUT bids); веб-форма предлагает всем |
+| sealed | стабильно $0.10 | **покупается кодом всегда** через корзину платежей веб-API (проверено живой покупкой 09.10.2026; повторная покупка купленного — бесплатный no-op); путь `PUT bids action=seal` требует PFP и заменён |
 | sponsored | **динамическая per project** (наблюдения: $1.90 на ставке ₹7000 ≈ $84; $2.90 на $500; официальные «0.75%, min $1.90/$5, max $20» недостоверны) | слот **один на проект**, первый купивший занимает; аукциона нет, позиция не деградирует; покупка доступна и после ставки («Sponsor My Bid»); API-покупка: PUT `action=sponsor` + `amount` (семантика суммы не ясна) |
 | highlight | динамическая ($0.30 наблюдение; официально «$1.00» — недостоверно) | **не используем** (решение Gleb'а) |
 | Expert Guarantee | возвратный депозит от $2 / 2% ставки | ручной режим; официально: возврат после завершения проекта |

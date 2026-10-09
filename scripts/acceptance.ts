@@ -11,6 +11,8 @@ import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
 import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency } from "../src/index";
+import { buildBidBody, placeBid } from "../src/bidder";
+import { buySealedUpgrade } from "../src/payments";
 import type { Order } from "../src/types";
 
 let pass = 0;
@@ -80,7 +82,7 @@ function makeScore(partial: Record<string, unknown>) {
     weekly_limit_hours: null,
     delivery_days: 5,
     deadline_caveat: null,
-    take_upgrades: ["sealed"],
+    take_upgrades: ["sponsored"],
     ...partial,
   };
 }
@@ -149,24 +151,114 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 15, "price hourly: max(12, 13) -> snap 15");
 }
 
-// ---------- C3. план этапов ----------
+// ---------- C3. план этапов: валидация LLM-плана ----------
 {
-  const caseOf = (bottom: number, bidAvg: number) =>
-    normalizeScore(makeScore({ bid_amount: 1, ai_hours: 10 }), makeOrder({
+  const o = makeOrder({ budget_min: 100, budget_max: 500, budget_min_original: 100, budget_max_original: 500 });
+  const plan = (m: unknown) => validateScore(makeScore({ milestones: m }), o);
+  const valid = [
+    { description: "Project setup and kickoff", share: 30 },
+    { description: "Final delivery and handover", share: 70 },
+  ];
+  eq(plan(valid), [], "milestones: valid plan passes");
+  eq(
+    plan([{ description: "Project setup and kickoff", share: 30 }, { description: "Final delivery and handover", share: 60 }])
+      .some((e) => e.includes("sum to 100")),
+    true,
+    "milestones: shares != 100 -> error",
+  );
+  eq(
+    plan([{ description: "Project setup and kickoff", share: 40 }, { description: "Final delivery and handover", share: 60 }])
+      .some((e) => e.includes("first milestone share must be exactly 30")),
+    true,
+    "milestones: first share != 30 -> error",
+  );
+  eq(
+    plan([{ description: "Too short", share: 30 }, { description: "Final delivery and handover", share: 70 }])
+      .some((e) => e.includes("10-250 characters")),
+    true,
+    "milestones: 9-char description -> error",
+  );
+  const longDesc = "x".repeat(251);
+  eq(
+    plan([{ description: longDesc, share: 30 }, { description: "Final delivery and handover", share: 70 }])
+      .some((e) => e.includes("10-250 characters")),
+    true,
+    "milestones: 251-char description -> error",
+  );
+  const five = [30, 20, 20, 20, 10].map((share, i) => ({
+    description: i === 4 ? "Final delivery and handover" : "Project setup and kickoff",
+    share,
+  }));
+  eq(
+    plan(five).some((e) => e.includes("2 to 4 items")),
+    true,
+    "milestones: 5 items -> error",
+  );
+  // hourly с массивом -> ошибка.
+  const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
+  const h = validateScore(makeScore({ milestones: valid }), oh);
+  eq(h.some((e) => e.includes("must be null for hourly")), true, "milestones: hourly with array -> error");
+  // sealed в take_upgrades больше не выбирает LLM.
+  const sealed = validateScore(makeScore({ take_upgrades: ["sealed"] }), o);
+  eq(sealed.some((e) => e.includes("take_upgrades")), true, "validateScore rejects sealed in take_upgrades");
+}
+
+// ---------- C4. normalizeScore: план этапов (суммы, санитайз, фолбэк) ----------
+{
+  const o = makeOrder({ budget_min: 100, budget_max: 500, budget_min_original: 100, budget_max_original: 500 });
+  // LLM-план валиден: сумма этапов точно равна ставке, последний — остаток.
+  const llm = [
+    { description: "Project setup and kickoff", share: 30 },
+    { description: "Final delivery and handover", share: 70 },
+  ];
+  const r = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, milestones: llm }), o, cfg);
+  eq(r.bid_amount, 100, "LLM plan: bid recalculated by code (bottom of range)");
+  eq(r.milestones?.length, 2, "LLM plan: 2 milestones kept");
+  eq(r.milestones![0].amount, 30, "LLM plan: first amount 30% of bid 100");
+  // bid_avg 400 -> target 260 -> ставка 260: 30% = 78, остаток = 182.
+  const r2 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 5, milestones: llm }), { ...o, bid_avg: 400 }, cfg);
+  eq(r2.bid_amount, 260, "LLM plan: bid from deterministic formula");
+  const sum2 = r2.milestones!.reduce((a, m) => a + m.amount, 0);
+  eq(sum2, r2.bid_amount, "LLM plan: sum of milestones equals bid exactly");
+  eq(r2.milestones![1].amount, 182, "LLM plan: last milestone is the remainder");
+  // Описания санитайзятся: юникод-тире -> дефис.
+  const dash = [
+    { description: "Setup — kickoff", share: 30 },
+    { description: "Final delivery and handover", share: 70 },
+  ];
+  const r3 = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, milestones: dash }), o, cfg);
+  eq(r3.milestones![0].description.includes("-"), true, "LLM plan: em dash sanitized to hyphen");
+  ok(!/[—–]/.test(r3.milestones![0].description), "LLM plan: no typographic dashes left");
+  // Описание после санитайза короче 10 символов -> типовое
+  // ("**Setup** x" — 11 символов до санитайза, "Setup x" — 7 после).
+  const short = [
+    { description: "**Setup** x", share: 30 },
+    { description: "Final delivery and handover", share: 70 },
+  ];
+  const r4 = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, milestones: short }), o, cfg);
+  eq(r4.milestones![0].description, "Project setup and kickoff", "LLM plan: sanitized-short description replaced with fallback");
+  // Фолбэк по размеру: невалидный LLM-план (сумма 90) -> кодовая схема.
+  // bottom 100, avg 250 -> max(100, 162.5) = 162.5 -> снеп 160 -> net 144 < $200 -> [30, 70].
+  const caseOf = (bottom: number, bidAvg: number, milestones: unknown) =>
+    normalizeScore(makeScore({ bid_amount: 1, ai_hours: 10, milestones }), makeOrder({
       budget_min: bottom, budget_max: 5000, budget_min_original: bottom, budget_max_original: 5000,
       bid_avg: bidAvg,
     }), cfg);
-  // bottom 100, avg 250 -> max(100, 162.5) = 162.5 -> снеп 165 -> net 148.5 < $200 -> [30, 70].
-  eq(JSON.stringify(caseOf(100, 250).milestone_plan), JSON.stringify([30, 70]), "plan < $200 -> 30/70");
-  // bottom 300, avg 800 -> max(300, 520) = 520 -> net 468 -> [30, 30, 40].
-  eq(JSON.stringify(caseOf(300, 800).milestone_plan), JSON.stringify([30, 30, 40]), "plan $200-1000 -> 30/30/40");
-  // bottom 1200, avg 3000 -> max(1200, 1950) = 1950 -> net 1755 -> [30, 30, 30, 10].
-  eq(JSON.stringify(caseOf(1200, 3000).milestone_plan), JSON.stringify([30, 30, 30, 10]), "plan > $1000 -> 4 stages");
-  // hourly — без плана.
-  const h = normalizeScore(makeScore({ bid_amount: 1 }), makeOrder({
-    type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25,
-  }), cfg);
-  eq(h.milestone_plan, null, "plan hourly -> null");
+  const badPlan = [{ description: "Project setup and kickoff", share: 30 }, { description: "Final delivery and handover", share: 60 }];
+  const f1 = caseOf(100, 250, badPlan);
+  eq(f1.milestones!.map((m) => m.description), ["Project setup and kickoff", "Final delivery and handover"], "fallback < $200: descriptions");
+  eq(f1.milestones!.map((m) => m.amount), [48, 112], "fallback < $200: 30/70 of bid 160");
+  const f2 = caseOf(300, 800, null);
+  eq(f2.milestones!.length, 3, "fallback $200-1000: 3 stages");
+  eq(f2.milestones![2].description, "Final delivery and handover", "fallback $200-1000: last description");
+  const f3 = caseOf(1200, 3000, null);
+  eq(f3.milestones!.length, 4, "fallback > $1000: 4 stages");
+  const sum3 = f3.milestones!.reduce((a, m) => a + m.amount, 0);
+  eq(sum3, f3.bid_amount, "fallback: sum of milestones equals bid exactly");
+  // hourly и PASS -> null.
+  const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
+  const h = normalizeScore(makeScore({ bid_amount: 1, milestones: null }), oh, cfg);
+  eq(h.milestones, null, "milestones hourly -> null");
 }
 
 // ---------- E. force-pass по score ----------
@@ -215,7 +307,7 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(good, [], "validateScore accepts native bid in range");
   const passZeros = validateScore(makeScore({ verdict: "PASS", bid_amount: 0, net_amount: 0, delivery_days: 0, value_score: 0 }), o);
   eq(passZeros, [], "validateScore accepts PASS zeros");
-  const dup = validateScore(makeScore({ take_upgrades: ["sealed", "sealed"] }), o);
+  const dup = validateScore(makeScore({ take_upgrades: ["sponsored", "sponsored"] }), o);
   ok(dup.some((e) => e.includes("duplicates")), "validateScore rejects duplicate upgrades");
 }
 
@@ -858,6 +950,122 @@ async function testConcurrencyPool() {
   eq(empty.length, 0, "pool: пустой батч — пустой результат");
 }
 
+// ---------- P. bidder/payments: тело ставки, гарды, корзина sealed ----------
+async function testBidderPayments() {
+  const realFetch = globalThis.fetch;
+  const score = (milestones: unknown, bid = 260) =>
+    ({ bid_amount: bid, delivery_days: 5, milestones } as any);
+  const ms = [
+    { description: "Project setup and kickoff", amount: 78 },
+    { description: "Final delivery and handover", amount: 182 },
+  ];
+
+  // buildBidBody: milestone_percentage 50 при 2+ этапах, 100 без плана;
+  // showcases всегда []; bidder_id — из веб-авторизации.
+  const body2 = buildBidBody(42, 94242579, "Bid text", score(ms));
+  eq(body2.milestone_percentage, 50, "bid body: 50 with 2+ milestones");
+  eq(body2.showcases, [], "bid body: showcases always empty");
+  eq(body2.bidder_id, 94242579, "bid body: bidder_id");
+  eq(body2.project_id, 42, "bid body: project_id");
+  eq(body2.amount, 260, "bid body: amount from score");
+  const bodyNull = buildBidBody(42, 94242579, "Bid text", score(null));
+  eq(bodyNull.milestone_percentage, 100, "bid body: 100 without milestones");
+
+  // Окружение placeBid: режим live, веб-сессия в KV, D1-заглушка для леджера.
+  const store = new Map<string, string>([
+    ["mode", "live"],
+    ["fl:auth", JSON.stringify({ userId: "94242579", hash: "test-hash" })],
+  ]);
+  const env = {
+    FREELANCER_API_BASE: "https://www.freelancer.com/api/projects/0.1",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _o?: unknown) => void store.set(k, v),
+    },
+    DB: {
+      prepare: () => ({
+        bind: () => ({ run: async () => ({}) }),
+        first: async () => null,
+      }),
+    },
+  } as any;
+  const order = makeOrder({});
+
+  // Гард: текст 99 символов — reason bid-text-too-short, запрос не уходит.
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return new Response("{}", { status: 200 }); }) as any;
+  const short = await placeBid(env, order, score(ms), "x".repeat(99));
+  eq(short.placed, false, "guard: short text not placed");
+  eq(short.reason, "bid-text-too-short", "guard: bid-text-too-short reason");
+  eq(calls, 0, "guard: no fetch on short text");
+
+  // Полный успешный цикл: ставка -> 2 запроса этапов -> корзина sealed.
+  const requests: { url: string; method: string; body: any; headers: Record<string, string> }[] = [];
+  globalThis.fetch = (async (
+    url: string,
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
+  ) => {
+    let body: any = null;
+    try { body = JSON.parse(init?.body ?? ""); } catch { /* не JSON */ }
+    requests.push({ url, method: init?.method ?? "GET", body, headers: init?.headers ?? {} });
+    const okJson = (result: unknown) =>
+      new Response(JSON.stringify({ status: "success", result }), { status: 200 });
+    if (url.includes("/milestone_requests/")) return okJson({ id: 900 + requests.length });
+    if (url.endsWith("/carts/")) return okJson({ id: 777 });
+    if (url.includes("/bids/")) return okJson({ id: 555 });
+    return okJson({});
+  }) as any;
+
+  const placed = await placeBid(env, order, score(ms), "Bid text " + "long enough ".repeat(12) + "end.");
+  eq(placed.placed, true, "placeBid: placed");
+  eq(placed.bidId, 555, "placeBid: bid id parsed");
+  eq(placed.milestones?.requested, 2, "placeBid: 2 milestone requests");
+  eq(placed.milestones?.failed, null, "placeBid: no milestone failures");
+  eq(placed.sealPurchase, "ok", "placeBid: sealed bought via cart");
+
+  const bidReq = requests.find((r) => r.url.includes("/bids/"));
+  eq(bidReq?.body.milestone_percentage, 50, "placeBid: bid body milestone_percentage 50");
+  eq(bidReq?.body.bidder_id, 94242579, "placeBid: bid body bidder_id from web auth");
+  eq(bidReq?.body.showcases, [], "placeBid: bid body showcases empty");
+  eq(bidReq?.headers["freelancer-auth-v2"], "94242579;test-hash", "placeBid: web auth header sent");
+
+  const msReqs = requests.filter((r) => r.url.includes("/milestone_requests/"));
+  eq(msReqs.length, 2, "placeBid: 2 milestone POSTs");
+  eq(msReqs.reduce((a, r) => a + r.body.amount, 0), 260, "placeBid: milestone amounts sum equals bid");
+  eq(msReqs[0].body.bid_id, 555, "placeBid: milestone request carries bid id");
+  eq(msReqs[0].body.project_id, 1, "placeBid: milestone request carries project id");
+  ok(
+    store.has("ms:req:555"),
+    "placeBid: milestone requests persisted to KV",
+  );
+
+  const cartReq = requests.find((r) => r.url.endsWith("/carts/") && r.method === "POST");
+  eq(cartReq?.body.return_action?.destination, "project_view_page", "cart: return destination");
+  eq(cartReq?.body.return_action?.payload, "1", "cart: payload = projectId");
+  const itemReq = requests.find((r) => r.url.includes("cart_items"));
+  eq(itemReq?.body.context_type, "bid_upgrade", "cart item: context_type");
+  eq(itemReq?.body.currency, 1, "cart item: currency USD id");
+  eq(itemReq?.body.amount, 0.1, "cart item: sealed price $0.10");
+  eq(itemReq?.body.context_sub_type, 3, "cart item: sealed sub type 3");
+  eq(itemReq?.body.cart_id, 777, "cart item: cart id from create");
+  eq(itemReq?.body.context_id, "555", "cart item: context id = bid id");
+  const processReq = requests.find((r) => r.url.endsWith("/carts/777") && r.method === "PUT");
+  eq(processReq?.body, { action: "process" }, "cart: process body");
+  eq(cartReq?.headers["freelancer-auth-v2"], "94242579;test-hash", "cart: web auth header");
+
+  // buySealedUpgrade напрямую: сбой корзины — причина из тела ошибки, дальше не идём.
+  let cartCalls = 0;
+  globalThis.fetch = (async () => {
+    cartCalls++;
+    return new Response(JSON.stringify({ error_code: "PAYMENTS_DOWN" }), { status: 500 });
+  }) as any;
+  const direct = await buySealedUpgrade({ userId: "94242579", hash: "test-hash" }, 555, 1);
+  eq(direct, "PAYMENTS_DOWN", "payments: cart failure reason from body");
+  eq(cartCalls, 1, "payments: stop on cart failure");
+
+  globalThis.fetch = realFetch;
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -866,6 +1074,7 @@ async function testConcurrencyPool() {
   await testOrderContext();
   await testConcurrencyPool();
   await testSponsoredDaily();
+  await testBidderPayments();
   await testSearchChannel();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);

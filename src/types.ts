@@ -62,10 +62,11 @@ export interface ScoreResult {
   take_upgrades: UpgradeId[];
   value_score: number;
   ai_hours: number;
-  // План этапов (доли в процентах, первый всегда 30, сумма 100).
-  // Размер ставки: <$200 → [30,70]; $200–1000 → [30,30,40]; >$1000 → [30,30,30,10].
-  // Только для fixed; hourly → null. Код считает, LLM озвучивает в тексте.
-  milestone_plan: number[] | null;
+  // План этапов: описание и финальная сумма в валюте заказа. Состав и доли
+  // предлагает LLM при скоринге (первый этап строго 30%), суммы пересчитывает
+  // код от итоговой ставки. Только для fixed; hourly и PASS → null.
+  // Доли в процентах, первый всегда 30, сумма 100.
+  milestones: { description: string; amount: number }[] | null;
 }
 
 export type UpgradeId = "sealed" | "sponsored";

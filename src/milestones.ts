@@ -2,12 +2,15 @@ import type { Env, Order } from "./types";
 import { getConfig } from "./config";
 import { fetchProjectsByIds } from "./enrich";
 import { sendTelegram, alert } from "./telegram";
+import { resolveWebAuth, webAuthHeaders } from "./web-auth";
 
 export interface MilestoneCheckResult {
   dryRun: boolean;
   bidsSeen: number;
   awarded: { bid_id: number; project_id: number; amount: number; raw_status: unknown }[];
-  requested: { bid_id: number; project_id: number; amount: number; request_id?: number; error?: string }[];
+  // Запросы со сменой статуса (не создание — все этапы уходят со ставкой,
+  // см. bidder.ts): переход в active/funded/released.
+  requested: { bid_id: number; project_id: number; amount: number; request_id?: number; status?: string; error?: string }[];
   skipped: { bid_id: number; reason: string }[];
 }
 
@@ -19,6 +22,21 @@ interface RawBid {
   award_status?: unknown;
   frontend_bid_status?: unknown;
   time_awarded?: unknown;
+  [key: string]: unknown;
+}
+
+// Состояние этапных запросов ставки — пишет bidder.ts при размещении ставки:
+// KV ms:req:<bid_id> = {project_id, requests:[{id, amount, description}], ts}.
+interface StoredRequest {
+  id?: number;
+  amount?: number;
+  description?: string;
+  status?: string;
+}
+
+interface RawMilestoneRequest {
+  id?: number;
+  status?: unknown;
   [key: string]: unknown;
 }
 
@@ -36,37 +54,17 @@ export function isAwarded(bid: RawBid): boolean {
 const KV_LAST_CHECK = "ms:last_check";
 const THROTTLE_SEC = 300;
 const KV_REQ_PREFIX = "ms:req:";
-const KV_REQ_TTL = 60 * 86400;
-const KICKOFF_RATIO = 0.3;
+const KV_AWARD_PREFIX = "ms:award:";
+const KV_STATE_TTL = 60 * 86400;
 
-// Статус последнего milestone-запроса по id (null — не найден/ошибка).
-async function fetchMilestoneRequestStatus(
-  cfg: { freelancerBase: string; flOauthToken: string; flApiKey: string },
-  authHeaders: Record<string, string>,
-  requestId: number | null,
-): Promise<string | null> {
-  if (requestId === null) return null;
-  try {
-    const res = await fetch(
-      `${cfg.freelancerBase}/milestone_requests/?milestone_requests[]=${requestId}`,
-      { headers: authHeaders, signal: AbortSignal.timeout(15000) },
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      status?: string;
-      result?: { milestone_requests?: Record<string, { status?: unknown }> };
-    };
-    const mr = data.result?.milestone_requests?.[String(requestId)];
-    return typeof mr?.status === "string" ? mr.status : null;
-  } catch {
-    return null;
-  }
-}
+// Статусы этапных запросов, о переходе в которые алертим работодателю
+// (деньги зарезервированы/выпущены). Новые терминальные значения, отличные от
+// сохранённого, тоже алертим — список живого API может быть шире.
+const ALERT_STATUSES = new Set(["active", "funded", "released"]);
 
 async function fetchMyBids(
-  env: Env,
-  userId: string,
   base: string,
+  userId: string,
   authHeaders: Record<string, string>,
 ): Promise<RawBid[]> {
   const res = await fetch(`${base}/bids/?bidders[]=${userId}`, {
@@ -86,6 +84,56 @@ async function fetchMyBids(
   return [];
 }
 
+// Статусы этапных запросов ставки: GET /milestone_requests/?bids[]=<bid_id>.
+// Ответ тот же конверт, что у fetchMyBids: result.milestone_requests — словарь
+// или список, разбираем оба. Ошибка/не-ok → null (молча пропускаем, тик не ломаем).
+async function fetchBidRequestStatuses(
+  base: string,
+  bidId: number,
+  authHeaders: Record<string, string>,
+): Promise<Map<number, string> | null> {
+  try {
+    const res = await fetch(`${base}/milestone_requests/?bids[]=${bidId}`, {
+      headers: authHeaders,
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      status?: string;
+      result?: { milestone_requests?: unknown };
+    };
+    if (data.status !== "success") return null;
+    const raw = data.result?.milestone_requests;
+    const list: RawMilestoneRequest[] = Array.isArray(raw)
+      ? (raw as RawMilestoneRequest[])
+      : raw && typeof raw === "object"
+        ? (Object.values(raw) as RawMilestoneRequest[])
+        : [];
+    const out = new Map<number, string>();
+    for (const mr of list) {
+      if (typeof mr?.id === "number" && typeof mr.status === "string") {
+        out.set(mr.id, mr.status);
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function projectLabel(env: Env, projectId: number): Promise<{ part: string; sign: string }> {
+  let order: Order | undefined;
+  try {
+    order = (await fetchProjectsByIds(env, [projectId]))[0];
+  } catch {
+    order = undefined;
+  }
+  return {
+    part: order ? order.url : `project #${projectId}`,
+    sign: order?.currency_sign ?? "$",
+  };
+}
+
 export async function checkMilestones(
   env: Env,
   opts?: { dryRun?: boolean; force?: boolean },
@@ -94,20 +142,27 @@ export async function checkMilestones(
   const result: MilestoneCheckResult = { dryRun, bidsSeen: 0, awarded: [], requested: [], skipped: [] };
 
   const cfg = getConfig(env);
-  if (!cfg.flOauthToken && !cfg.flApiKey) {
+
+  // Авторизация: основной путь — веб (freelancer-auth-v2), фолбэк —
+  // OAuth-токен либо ключ Develop API (закрытые точки принимают Bearer,
+  // проверено 04.10.2026).
+  const webAuth = await resolveWebAuth(env);
+  const authHeaders: Record<string, string> | null = webAuth
+    ? webAuthHeaders(webAuth)
+    : cfg.flOauthToken
+      ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
+      : cfg.flApiKey
+        ? { Authorization: `Bearer ${cfg.flApiKey}` }
+        : null;
+  if (!authHeaders) {
     result.skipped.push({ bid_id: 0, reason: "oauth-missing" });
     return result;
   }
-  if (!cfg.flUserId) {
+  const userId = webAuth?.userId ?? cfg.flUserId;
+  if (!userId) {
     result.skipped.push({ bid_id: 0, reason: "fl-user-id-missing" });
     return result;
   }
-
-  // Авторизация: основной путь — OAuth-токен аккаунта; фолбэк — ключ Develop API
-  // (закрытые точки принимают Authorization: Bearer, проверено 04.10.2026).
-  const authHeaders: Record<string, string> = cfg.flOauthToken
-    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
-    : { Authorization: `Bearer ${cfg.flApiKey}` };
 
   // Троттлинг: не чаще раза в 5 минут (обход — только force).
   const now = Date.now();
@@ -120,20 +175,33 @@ export async function checkMilestones(
     }
   }
 
-  const bids = await fetchMyBids(env, cfg.flUserId, cfg.freelancerBase, authHeaders);
+  // --- Детект назначения: наши ставки → awarded-алерт (один раз на ставку).
+  let bids: RawBid[] = [];
+  try {
+    bids = await fetchMyBids(cfg.freelancerBase, userId, authHeaders);
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("HTTP 401")) {
+      result.skipped.push({ bid_id: 0, reason: "oauth-invalid" });
+      await alert(env, "Milestones: авторизация отклонена (401)");
+      return result;
+    }
+    throw e;
+  }
   result.bidsSeen = bids.length;
   if (!opts?.force) {
     await env.ORDERS_KV.put(KV_LAST_CHECK, String(now), { expirationTtl: 3600 });
   }
 
-  const awarded = bids.filter((b) => !b.retracted && isAwarded(b));
-  for (const bid of awarded) {
+  for (const bid of bids) {
+    if (bid.retracted || !isAwarded(bid)) continue;
     const bidId = Number(bid.id);
     const projectId = Number(bid.project_id);
     const bidAmount = Number(bid.amount);
     if (!Number.isFinite(bidId) || !Number.isFinite(projectId)) continue;
 
-    // Сырые статусы логируем: по первому живому назначению подкорректируем детект.
+    // Сырые поля назначения логируем: по первому живому назначению
+    // подкорректируем эвристику isAwarded.
     console.log("milestones.awarded-bid", {
       bid_id: bidId,
       project_id: projectId,
@@ -148,128 +216,101 @@ export async function checkMilestones(
       raw_status: bid.award_status ?? bid.frontend_bid_status,
     });
 
-    // Состояние цепочки этапов: KV ms:req:<bid_id> = {next_index, plan, requested[]}.
-    // План приходит из bidder.ts (ms:plan:<bid_id>), fallback [30, 70].
-    const dedupKey = `${KV_REQ_PREFIX}${bidId}`;
-    let state: { next_index: number; plan: number[]; requested: { amount: number; request_id: number | null }[] } | null = null;
+    // Дедуп: алертим один раз на ставку (KV ms:award:<bid_id>).
+    const awardKey = `${KV_AWARD_PREFIX}${bidId}`;
+    const alreadyAlerted = await env.ORDERS_KV.get(awardKey);
+    if (alreadyAlerted !== null) continue;
+    if (dryRun) continue;
     try {
-      const raw = await env.ORDERS_KV.get(dedupKey);
-      if (raw !== null) state = JSON.parse(raw);
+      await env.ORDERS_KV.put(awardKey, String(now), { expirationTtl: KV_STATE_TTL });
+    } catch {
+      // не записалось — алертим в следующий раз, дубль маловероятен
+    }
+    const { part, sign } = await projectLabel(env, projectId);
+    await sendTelegram(
+      env,
+      `🏆 Ставка назначена!\n\nПроект: ${part}\nСтавка: ${sign}${bidAmount} (bid #${bidId})\nВсе этапы уже запрошены — жди принятия работодателем.`,
+    );
+  }
+
+  // --- Опрос статусов этапных запросов наших ставок (KV ms:req:<bid_id>).
+  let listed: { keys: { name: string }[] };
+  try {
+    listed = await env.ORDERS_KV.list({ prefix: KV_REQ_PREFIX });
+  } catch {
+    listed = { keys: [] };
+  }
+  for (const key of listed.keys) {
+    const bidId = Number(key.name.slice(KV_REQ_PREFIX.length));
+    if (!Number.isFinite(bidId)) continue;
+
+    let state: { project_id?: number; requests?: StoredRequest[]; ts?: number } | null = null;
+    try {
+      const raw = await env.ORDERS_KV.get(key.name);
+      if (raw !== null) {
+        state = JSON.parse(raw) as { project_id?: number; requests?: StoredRequest[]; ts?: number };
+      }
     } catch {
       state = null;
     }
-    if (state === null) {
-      let plan = [30, 70];
-      try {
-        const planRaw = await env.ORDERS_KV.get(`ms:plan:${bidId}`);
-        if (planRaw !== null) {
-          const parsed = JSON.parse(planRaw) as { plan?: unknown };
-          if (Array.isArray(parsed.plan) && parsed.plan.length >= 2 && parsed.plan.length <= 4) {
-            plan = parsed.plan.map(Number);
-          }
-        }
-      } catch {
-        // fallback-план
-      }
-      state = { next_index: 0, plan, requested: [] };
-    }
-    if (state.next_index >= state.plan.length) {
-      result.skipped.push({ bid_id: bidId, reason: "plan-complete" });
+    if (state === null || !Array.isArray(state.requests) || state.requests.length === 0) {
+      result.skipped.push({ bid_id: bidId, reason: "no-state" });
       continue;
     }
-
-    // Этап 2+ запрашиваем только когда предыдущий выпущен (Released).
-    if (state.next_index > 0) {
-      const last = state.requested[state.requested.length - 1];
-      const status = await fetchMilestoneRequestStatus(cfg, authHeaders, last?.request_id ?? null);
-      if (status === "pending" || status === "active" || status === "created" || status === "funded") {
-        result.skipped.push({ bid_id: bidId, reason: "awaiting-release" });
-        continue;
-      }
-      if (status !== "released" && status !== null) {
-        result.skipped.push({ bid_id: bidId, reason: `prev-${status}` });
-        continue;
-      }
-    }
-
-    const share = state.plan[state.next_index];
-    const amount = Math.round(bidAmount * (share / 100) * 100) / 100;
-    if (!(amount > 0)) {
-      result.skipped.push({ bid_id: bidId, reason: "zero-amount" });
-      continue;
-    }
-    const stageNo = state.next_index + 1;
-    const stageTotal = state.plan.length;
-    const description =
-      stageNo === 1
-        ? "Kickoff milestone - 30% upfront to start work; the remainder on delivery."
-        : `Milestone ${stageNo} of ${stageTotal} (${share}%).`;
+    const projectId = Number(state.project_id);
 
     if (dryRun) {
-      result.requested.push({ bid_id: bidId, project_id: projectId, amount });
+      for (const r of state.requests) {
+        result.requested.push({
+          bid_id: bidId,
+          project_id: projectId,
+          amount: Number(r.amount) || 0,
+          request_id: r.id,
+          status: r.status ?? "unknown",
+        });
+      }
       continue;
     }
 
-    let res: Response;
-    try {
-      res = await fetch(`${cfg.freelancerBase}/milestone_requests/`, {
-        method: "POST",
-        headers: {
-          ...authHeaders,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ project_id: projectId, bid_id: bidId, amount, description }),
-        signal: AbortSignal.timeout(20000),
-      });
-    } catch (e) {
+    const statuses = await fetchBidRequestStatuses(cfg.freelancerBase, bidId, authHeaders);
+    if (statuses === null) {
+      result.skipped.push({ bid_id: bidId, reason: "status-fetch-failed" });
+      continue;
+    }
+
+    let stateChanged = false;
+    for (const r of state.requests) {
+      const requestId = typeof r.id === "number" ? r.id : null;
+      if (requestId === null) continue;
+      const current = statuses.get(requestId);
+      if (current === undefined) continue;
+      const prev = r.status ?? null;
+      if (current === prev) continue;
+      r.status = current;
+      stateChanged = true;
+      const amount = Number(r.amount) || 0;
+      const isAlertable = ALERT_STATUSES.has(current) || (prev !== null && ALERT_STATUSES.has(prev));
+      if (!isAlertable) continue;
       result.requested.push({
         bid_id: bidId,
         project_id: projectId,
         amount,
-        error: String(e).slice(0, 300),
+        request_id: requestId,
+        status: current,
       });
-      continue;
-    }
-
-    if (res.ok) {
-      let requestId: number | undefined;
-      try {
-        const data = (await res.json()) as { result?: { id?: number } };
-        requestId = data.result?.id;
-      } catch {
-        // id не критичен
-      }
-      state.requested.push({ amount, request_id: requestId ?? null });
-      state.next_index += 1;
-      try {
-        await env.ORDERS_KV.put(dedupKey, JSON.stringify(state), { expirationTtl: KV_REQ_TTL });
-      } catch {
-        // состояние не записалось — повторим на следующем тике (дедупа нет, риск
-        // двойного запроса приблизительно = нулю: клиенту нужно принять каждый)
-      }
-      result.requested.push({ bid_id: bidId, project_id: projectId, amount, request_id: requestId });
-      let order: Order | undefined;
-      try {
-        order = (await fetchProjectsByIds(env, [projectId]))[0];
-      } catch {
-        order = undefined;
-      }
-      const sign = order?.currency_sign ?? "$";
-      const projectPart = order ? order.url : `project #${projectId}`;
+      const { part, sign } = await projectLabel(env, projectId);
       await sendTelegram(
         env,
-        `💰 Запрошен этап оплаты (${stageNo}/${stageTotal})\n\nПроект: ${projectPart}\nЭтап: ${sign}${amount} (${share}% от ставки ${sign}${bidAmount})\nЗапрос #${requestId ?? "?"} — ждёт принятия работодателем.`,
+        `💰 Этап по проекту ${part}: ${current} (${sign}${amount}, запрос #${requestId})`,
       );
-      continue;
     }
-
-    const text = (await res.text()).slice(0, 300);
-    if (res.status === 401) {
-      result.skipped.push({ bid_id: bidId, reason: "oauth-invalid" });
-      await alert(env, "Milestones: OAuth-токен отклонён (401)");
-      continue;
+    if (stateChanged) {
+      try {
+        await env.ORDERS_KV.put(key.name, JSON.stringify(state), { expirationTtl: KV_STATE_TTL });
+      } catch {
+        // статусы не записались — переалертим на следующем тике (дедупа нет)
+      }
     }
-    result.requested.push({ bid_id: bidId, project_id: projectId, amount, error: `HTTP ${res.status}: ${text}` });
   }
 
   return result;

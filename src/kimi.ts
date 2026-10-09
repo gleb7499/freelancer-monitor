@@ -91,6 +91,12 @@ function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
+// Типовые английские описания этапов для кодового фолбэка (платформа требует
+// 10-250 символов на описание).
+const FALLBACK_MILESTONE_FIRST = "Project setup and kickoff";
+const FALLBACK_MILESTONE_MIDDLE = ["Core implementation", "Integration and testing"];
+const FALLBACK_MILESTONE_LAST = "Final delivery and handover";
+
 // Курс родной валюты заказа за 1 USD — восстанавливается из бюджета.
 function orderRate(order: Order): number {
   return order.budget_min > 0 && order.budget_min_original > 0
@@ -231,7 +237,55 @@ export function validateScore(s: any, order: Order): string[] {
   ) {
     errors.push("ai_hours must be a positive number");
   }
-  const UPGRADE_IDS = ["sealed", "sponsored"];
+  // План этапов: hourly — строго null; для fixed+BID допустим null (мелкий заказ)
+  // или валидный план. Для PASS не валидируем строго — normalize всё равно обнулит.
+  if (order.type === "hourly") {
+    if (s.milestones !== null && s.milestones !== undefined) {
+      errors.push("milestones must be null for hourly projects");
+    }
+  } else if (s.verdict === "BID") {
+    const plan = s.milestones;
+    if (plan !== null && plan !== undefined) {
+      if (!Array.isArray(plan)) {
+        errors.push("milestones must be an array of {description, share} or null");
+      } else {
+        if (plan.length < 2 || plan.length > 4) {
+          errors.push(`milestones must contain 2 to 4 items (got ${plan.length})`);
+        }
+        let shareSum = 0;
+        for (const [i, item] of plan.entries()) {
+          if (
+            item === null ||
+            typeof item !== "object" ||
+            typeof item.description !== "string" ||
+            typeof item.share !== "number"
+          ) {
+            errors.push(`milestones[${i}] must be an object with string description and integer share`);
+            continue;
+          }
+          if (!Number.isInteger(item.share) || item.share < 1 || item.share > 99) {
+            errors.push(`milestones[${i}].share must be an integer in [1, 99]`);
+          }
+          const len = item.description.trim().length;
+          if (len < 10 || len > 250) {
+            errors.push(`milestones[${i}].description must be 10-250 characters (got ${len})`);
+          }
+          shareSum += item.share;
+        }
+        if (plan.length >= 2 && plan.length <= 4 && shareSum !== 100) {
+          errors.push(`milestone shares must sum to 100 (got ${shareSum})`);
+        }
+        if (
+          plan.length > 0 &&
+          typeof plan[0]?.share === "number" &&
+          plan[0].share !== 30
+        ) {
+          errors.push(`first milestone share must be exactly 30 (got ${plan[0].share})`);
+        }
+      }
+    }
+  }
+  const UPGRADE_IDS = ["sponsored"];
   if (!Array.isArray(s.take_upgrades)) {
     errors.push("take_upgrades must be an array");
   } else if (
@@ -240,7 +294,7 @@ export function validateScore(s: any, order: Order): string[] {
     )
   ) {
     errors.push(
-      "take_upgrades items must be one of sealed, highlight, sponsored"
+      "take_upgrades items must be \"sponsored\" (sealed is bought by code always)"
     );
   } else if (new Set(s.take_upgrades).size !== s.take_upgrades.length) {
     errors.push("take_upgrades must not contain duplicates");
@@ -302,16 +356,73 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     // score пересчитываем от финального net (совпадает с scoreFor(bid), но для ясности).
     valueScore = scoreFor(bid);
   }
-  // План этапов для fixed — по итоговой ставке в USD-эквиваленте.
-  let milestonePlan: number[] | null = null;
+  // План этапов для fixed: состав и доли предлагает LLM, суммы пересчитываем
+  // от итоговой ставки. Плана нет или он невалиден — кодовая схема по размеру.
+  let milestones: { description: string; amount: number }[] | null = null;
   if (s.verdict === "BID" && order.type === "fixed" && net > 0) {
-    const netUsd = net / rate;
-    milestonePlan =
-      netUsd > 1000
-        ? [30, 30, 30, 10]
-        : netUsd >= 200
-          ? [30, 30, 40]
-          : [30, 70];
+    const round2 = (x: number) => Math.round(x * 100) / 100;
+    const plan = s.milestones;
+    const planValid =
+      Array.isArray(plan) &&
+      plan.length >= 2 &&
+      plan.length <= 4 &&
+      plan.every(
+        (it: any) =>
+          it !== null &&
+          typeof it === "object" &&
+          typeof it.description === "string" &&
+          typeof it.share === "number" &&
+          Number.isInteger(it.share) &&
+          it.share >= 1 &&
+          it.share <= 99 &&
+          it.description.trim().length >= 10 &&
+          it.description.trim().length <= 250
+      ) &&
+      plan.reduce((a: number, it: any) => a + it.share, 0) === 100 &&
+      plan[0].share === 30;
+    if (planValid) {
+      let acc = 0;
+      milestones = plan.map((it: any, i: number) => {
+        const amount =
+          i < plan.length - 1 ? round2((bid * it.share) / 100) : round2(bid - acc);
+        acc = round2(acc + amount);
+        // Санитайзер может укоротить описание ниже платформенного минимума —
+        // тогда берём типовое описание этапа.
+        let description = sanitizeBidText(it.description);
+        if (description.length < 10) {
+          description =
+            i === 0
+              ? FALLBACK_MILESTONE_FIRST
+              : i === plan.length - 1
+                ? FALLBACK_MILESTONE_LAST
+                : FALLBACK_MILESTONE_MIDDLE[0];
+        }
+        return { description, amount };
+      });
+    } else {
+      const netUsd = net / rate;
+      const shares =
+        netUsd > 1000 ? [30, 30, 30, 10] : netUsd >= 200 ? [30, 30, 40] : [30, 70];
+      const n = shares.length;
+      const descFor = (i: number) =>
+        i === 0
+          ? FALLBACK_MILESTONE_FIRST
+          : i === n - 1
+            ? FALLBACK_MILESTONE_LAST
+            : FALLBACK_MILESTONE_MIDDLE[i - 1];
+      let acc = 0;
+      milestones = shares.map((share, i) => {
+        const amount =
+          i < n - 1 ? round2((bid * share) / 100) : round2(bid - acc);
+        acc = round2(acc + amount);
+        return { description: descFor(i), amount };
+      });
+      console.warn("normalizeScore: milestone plan fallback by size", {
+        id: order.id,
+        reason: plan === null || plan === undefined ? "no LLM plan" : "invalid LLM plan",
+        netUsd,
+      });
+    }
   }
   let weeklyLimit: number | null = null;
   if (order.type === "hourly") {
@@ -350,7 +461,7 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
       take_upgrades: s.take_upgrades,
       value_score: valueScore,
       ai_hours: s.ai_hours,
-      milestone_plan: milestonePlan,
+      milestones: null,
     };
   }
   return {
@@ -368,7 +479,7 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     take_upgrades: s.take_upgrades,
     value_score: valueScore,
     ai_hours: s.ai_hours,
-    milestone_plan: milestonePlan,
+    milestones,
   };
 }
 
@@ -507,13 +618,14 @@ export function buildBidMessages(
       .join("\n");
     notes.push(buildBidPortfolioNote(lines));
   }
-  if (score.milestone_plan && score.milestone_plan.length > 0) {
-    notes.push(
-      buildBidMilestonesNote(
-        score.milestone_plan.slice(1).join("% / "),
-        score.milestone_plan.join("/"),
-      ),
-    );
+  if (score.milestones && score.milestones.length > 0) {
+    const lines = score.milestones
+      .map((m) => {
+        const share = Math.round((m.amount / score.bid_amount) * 100);
+        return `${share}% - ${m.description}`;
+      })
+      .join("\n");
+    notes.push(buildBidMilestonesNote(lines));
   }
   notes.push(buildBidPriceNote(score.bid_amount, order.currency_code));
   return [

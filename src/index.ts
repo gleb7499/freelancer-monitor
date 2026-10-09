@@ -68,8 +68,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
   const startedAt = Date.now();
   log("tick.start", { trigger, mode });
 
-  // Запрос этапных платежей по назначенным ставкам — независимо от свежих
-  // заказов и bids-баланса (этапы bids не тратят). Ошибка не должна ломать тик.
+  // Детект назначения ставок и опрос статусов этапных запросов — независимо
+  // от свежих заказов и bids-баланса. Ошибка не должна ломать тик.
   try {
     const ms = await checkMilestones(env);
     if (ms.awarded.length > 0 || ms.requested.some((r) => !r.error)) {
@@ -392,8 +392,9 @@ async function processOrder(
 
     const bidResult = await placeBid(env, order, score, bidText);
 
-    // Консоль действий в карточке: sealed — ручная покупка всегда; ссылка на
-    // ставку — только если она реально размещена (в test-режиме bidId=null).
+    // Консоль действий в карточке: sealed покупает код автоматически (корзина),
+    // ручных действий по нему нет; ссылка на ставку — только если она реально
+    // размещена (в test-режиме bidId=null).
     const manualActions: ManualActions | null =
       score.take_upgrades.length > 0 || score.verdict === "BID"
         ? {
@@ -412,10 +413,12 @@ async function processOrder(
       header = `[TEST] ставка НЕ отправлена`;
     } else if (bidResult.placed) {
       const upgradesPart =
-        score.take_upgrades.length > 0 ? score.take_upgrades.join(", ") : "без апгрейдов";
+        score.take_upgrades.includes("sponsored") ? "sponsored" : "без апгрейдов";
       header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, план апгрейдов: ${upgradesPart}`;
-      if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
-        header += `\n⚠️ sealed НЕ куплен (покупка через API отклонена: ${bidResult.sealPurchase}) — купи вручную на сайте, если нужно`;
+      if (bidResult.sealPurchase === "no-web-auth") {
+        header += `\n⚠️ sealed не куплен: нет веб-авторизации`;
+      } else if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
+        header += `\n⚠️ sealed НЕ куплен (покупка через корзину отклонена: ${bidResult.sealPurchase}) — купи вручную на сайте, если нужно`;
       }
     } else if (bidResult.reason?.startsWith("insufficient-balance")) {
       header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;

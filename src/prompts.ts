@@ -95,11 +95,8 @@ export function buildBidPortfolioNote(portfolioLines: string): string {
   return fill(text(bidUserPortfolioMd), { PORTFOLIO_LINES: portfolioLines });
 }
 
-export function buildBidMilestonesNote(milestonesRest: string, milestonesFull: string): string {
-  return fill(text(bidUserMilestonesMd), {
-    MILESTONES_REST: milestonesRest,
-    MILESTONES_FULL: milestonesFull,
-  });
+export function buildBidMilestonesNote(milestonesLines: string): string {
+  return fill(text(bidUserMilestonesMd), { MILESTONES_LINES: milestonesLines });
 }
 
 export function buildBidPriceNote(bidAmount: number, currency: string): string {
@@ -142,9 +139,21 @@ export const SCORING_JSON_SCHEMA = {
       weekly_limit_hours: { type: ["integer", "null"] },
       delivery_days: { type: "number" },
       deadline_caveat: { type: ["string", "null"] },
+      milestones: {
+        type: ["array", "null"],
+        items: {
+          type: "object",
+          properties: {
+            description: { type: "string" },
+            share: { type: "integer" },
+          },
+          required: ["description", "share"],
+          additionalProperties: false,
+        },
+      },
       take_upgrades: {
         type: "array",
-        items: { type: "string", enum: ["sealed", "sponsored"] },
+        items: { type: "string", enum: ["sponsored"] },
       },
     },
     required: [
@@ -160,6 +169,7 @@ export const SCORING_JSON_SCHEMA = {
       "ai_hours",
       "delivery_days",
       "deadline_caveat",
+      "milestones",
       "take_upgrades",
     ],
     additionalProperties: false,

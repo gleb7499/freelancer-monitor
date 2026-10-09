@@ -74,8 +74,9 @@ export function formatPassCard(order: Order, score: ScoreResult): string {
   return parts.join("\n\n");
 }
 
-// Блок ручных действий в карточке BID: sealed всегда покупается вручную
-// (API требует PFP), sponsored — на усмотрение оператора по статусу слота.
+// Блок ручных действий в карточке BID: sealed покупает код автоматически
+// (через корзину платежей), ручных действий по нему нет; sponsored — единственный
+// ручной/полуручной апгрейд: на усмотрение оператора по статусу слота.
 // bidId=null в test-режиме (ставка не размещена — ссылки нет).
 export interface ManualActions {
   bidId: number | null;
@@ -139,16 +140,28 @@ export function formatOrderCard(
     parts.push(`✉️ Текст ставки (EN):\n<blockquote>${escHtml(bidText)}</blockquote>`);
   }
 
-  // Консоль действий: sealed — ручная покупка, sponsored — по статусу слота.
+  // Этапы оплаты (fixed): все запросы уходят сразу со ставкой (bidder.ts),
+  // здесь только показ плана работодателю. Доля = amount/ставка.
+  if (score.milestones !== null && score.milestones.length > 0) {
+    const lines = ["📌 Этапы оплаты (уже запрошены):"];
+    for (const m of score.milestones) {
+      const share = score.bid_amount > 0 ? Math.round((m.amount / score.bid_amount) * 100) : 0;
+      lines.push(`${share}% - ${escHtml(m.description)}: ${order.currency_sign}${m.amount}`);
+    }
+    parts.push(lines.join("\n"));
+  }
+
+  // Консоль действий: sponsored — по статусу слота (sealed — автоматически).
   if (manualActions) {
     const ma = manualActions;
     const lines = ["🛠 Ручные действия:"];
-    lines.push(`1. Sealed - $0.10: открой ставку и купи Sealed`);
     if (ma.sponsoredRemovedNote) {
-      lines.push(`2. ${ma.sponsoredPrice} - не берём: ${ma.sponsoredRemovedNote}`);
+      lines.push(`1. ${ma.sponsoredPrice} - не берём: ${ma.sponsoredRemovedNote}`);
     } else if (score.take_upgrades.includes("sponsored")) {
       const slot = ma.slotFree === null ? "не проверен" : ma.slotFree ? "свободен" : "занят";
-      lines.push(`2. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
+      lines.push(`1. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
+    } else {
+      lines.push("1. Нет — sealed куплен автоматически, sponsored не нужен");
     }
     parts.push(lines.join("\n"));
   }
