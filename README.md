@@ -15,7 +15,7 @@ newest first, submitdate cursor):
 ```
 [1] Intake            projects/active → normalizeProject
         ↓
-[2] Dedup/gate        D1 seen (30d retention); static gate: bids > 10 rejected
+[2] Dedup/gate        D1 seen (30d retention); static gate: bids > 15 rejected
         ↓
 [3] Enrich            projects/seo → order.client (verification, employer rating,
                       open orders) → goes into scoring JSON

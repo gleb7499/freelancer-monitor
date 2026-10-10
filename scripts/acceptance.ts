@@ -92,7 +92,7 @@ const cfg = {
   bidMinScore: 10,
   weeklyLimitHours: 40,
   // Потолки фазы 0 (как в wrangler.toml).
-  phaseMaxBids: 10,
+  phaseMaxBids: 15,
   phaseBudgetFixedUsd: 50,
   phaseBudgetHourlyUsd: 10,
 } as any;
@@ -801,9 +801,9 @@ async function testPortfolio() {
     null,
     "pregate: non-crypto skills pass",
   );
-  // Гейт конкуренции: границы порога (потолок 10 откликов).
-  eq(preBidRejectReason(makeOrder({ bids: 10, budget_min: 50, budget_min_original: 50 }), cfg), null, "pregate: bids = 10 passes");
-  eq(preBidRejectReason(makeOrder({ bids: 11 }), cfg), "rej:hot-competition", "pregate: bids = 11 rejected");
+  // Гейт конкуренции: границы порога (потолок 15 откликов).
+  eq(preBidRejectReason(makeOrder({ bids: 15, budget_min: 50, budget_min_original: 50 }), cfg), null, "pregate: bids = 15 passes");
+  eq(preBidRejectReason(makeOrder({ bids: 16 }), cfg), "rej:hot-competition", "pregate: bids = 16 rejected");
   // Бюджетный гейт fixed: дно вилки > $50 — отказ; 50 проходит; 0 (неизвестно) — пропуск.
   eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 50 }), cfg), null, "pregate: fixed budget_min = 50 passes");
   eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 51 }), cfg), "rej:budget-fixed", "pregate: fixed budget_min = 51 rejected");
