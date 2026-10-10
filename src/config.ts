@@ -26,7 +26,7 @@ export function getConfig(env: Env) {
     // Потолки фазы 0: конкуренция и бюджет (USD; для почасовых — ставка/ч).
     phaseMaxBids: num(env, "PHASE_MAX_BIDS", 15),
     phaseBudgetFixedUsd: num(env, "PHASE_BUDGET_FIXED_USD", 50),
-    phaseBudgetHourlyUsd: num(env, "PHASE_BUDGET_HOURLY_USD", 10),
+    phaseBudgetHourlyUsd: num(env, "PHASE_BUDGET_HOURLY_USD", 15),
   };
 }
 

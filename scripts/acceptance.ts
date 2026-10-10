@@ -94,7 +94,7 @@ const cfg = {
   // Потолки фазы 0 (как в wrangler.toml).
   phaseMaxBids: 15,
   phaseBudgetFixedUsd: 50,
-  phaseBudgetHourlyUsd: 10,
+  phaseBudgetHourlyUsd: 15,
 } as any;
 
 // ---------- A. normalizeScore: округление сетки (без пола/капа: нулевой бюджет) ----------
@@ -808,9 +808,9 @@ async function testPortfolio() {
   eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 50 }), cfg), null, "pregate: fixed budget_min = 50 passes");
   eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 51 }), cfg), "rej:budget-fixed", "pregate: fixed budget_min = 51 rejected");
   eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 0, budget_min_original: 0 }), cfg), null, "pregate: fixed budget_min = 0 (unknown) passes");
-  // Бюджетный гейт hourly: ставка > $10/ч — отказ; границы.
-  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 10, budget_min_original: 10 }), cfg), null, "pregate: hourly budget_min = 10 passes");
-  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 10.5, budget_min_original: 10.5 }), cfg), "rej:budget-hourly", "pregate: hourly budget_min = 10.5 rejected");
+  // Бюджетный гейт hourly: ставка > $15/ч — отказ; границы.
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 15, budget_min_original: 15 }), cfg), null, "pregate: hourly budget_min = 15 passes");
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 15.5, budget_min_original: 15.5 }), cfg), "rej:budget-hourly", "pregate: hourly budget_min = 15.5 rejected");
   eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 0, budget_min_original: 0 }), cfg), null, "pregate: hourly budget_min = 0 (unknown) passes");
   // Пороги берутся из настроек: при потолке 5 откликов bids = 6 уже отказ.
   const cfgTight = { ...cfg, phaseMaxBids: 5, phaseBudgetFixedUsd: 30, phaseBudgetHourlyUsd: 8 };
