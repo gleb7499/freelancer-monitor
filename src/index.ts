@@ -19,6 +19,12 @@ import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSc
 import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";
 
+// Компаратор сортировки заказов к скорингу: при дефиците bids свежие заказы
+// релевантнее — размещение идёт по этому порядку, LLM-квота тратится на всех.
+export function bySubmitTsDesc(a: Order, b: Order): number {
+  return b.submit_ts - a.submit_ts;
+}
+
 interface TickStats {
   mode: Mode;
   alertsFetched: number;
@@ -195,8 +201,8 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
         }
       }
 
-      // Гейт до LLM: физическая возможность ставки + жёсткая конкуренция
-      // (>50 откликов уже при появлении — см. preBidRejectReason).
+      // Гейт до LLM: физическая возможность ставки + жёсткие гейты фазы 0
+      // (конкуренция и бюджет — см. preBidRejectReason).
       const { kept, rejected } = await markAlertSeen(env, fresh, "active");
       stats.alertsFresh = kept.length;
       log("active.fresh", { fresh: kept.length, rejected: rejected.length });
@@ -213,8 +219,12 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
                 : reason === "rej:crypto-verified"
                   ? "крипто-проект — нужна верификация Freelancer"
                   : reason === "rej:hot-competition"
-                    ? "больше 50 откликов уже при появлении — конкуренция бешеная и растёт, шанс попасть в топ выдачи низкий"
-                    : reason;
+                    ? `больше ${cfg.phaseMaxBids} откликов уже при появлении — конкуренция бешеная и растёт, шанс попасть в топ выдачи низкий`
+                    : reason === "rej:budget-fixed"
+                      ? `бюджет выше потолка фазы 0 ($${cfg.phaseBudgetFixedUsd})`
+                      : reason === "rej:budget-hourly"
+                        ? `ставка выше потолка фазы 0 ($${cfg.phaseBudgetHourlyUsd}/ч)`
+                        : reason;
           await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
         }
       }
@@ -225,6 +235,9 @@ export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Pr
     await flushLogBuffer(env);
     return stats;
   }
+
+  // Сортировка — см. bySubmitTsDesc.
+  ordersToScore.sort(bySubmitTsDesc);
 
   // Артефакты заказа (вложения + страницы по ссылкам из описания) — только для
   // заказов, дошедших до LLM: уходят в JSON скоринга и в контекст текста ставки.
@@ -388,6 +401,23 @@ async function processOrder(
       bidText = await generateBidText(env, order, buildBidMessages(order, score, portfolio));
     } catch (e) {
       console.error("generateBidText failed:", e);
+    }
+
+    // Текст ставки не получен (LLM недоступен/молчит) — ставку не размещаем:
+    // bids не тратим, карточка предупреждает, сбой виден в кольцевом логе.
+    if (bidText === null) {
+      await logError(env, "order.error", { id: order.id, err: "bid-text-failed" });
+      await sendTelegram(
+        env,
+        `⚠️ Отклик НЕ отправлен: текст ставки не получен (LLM недоступен) — заказ пропущен, bids не потрачены\n\n${formatOrderCard(order, score, null)}`,
+      );
+      await logImportant(env, "order.notified", {
+        id: order.id,
+        title: order.title.slice(0, 80),
+        placed: false,
+        reason: "bid-text-failed",
+      });
+      return "bid";
     }
 
     const bidResult = await placeBid(env, order, score, bidText);
@@ -844,7 +874,7 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
 // DO однопоточный: тики не перекрываются, следующий аларм ставится
 // по завершении предыдущего. Cron (1/мин) — сторож: будит DO, если цепочка
 // прервалась (деплой, ошибка инфраструктуры).
-const TICK_INTERVAL_MS = 30_000;
+const TICK_INTERVAL_MS = 20_000;
 
 export class TickScheduler {
   constructor(

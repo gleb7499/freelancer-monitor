@@ -112,4 +112,8 @@ export interface Env {
   FL_API_KEY?: string;
   TARGET_HOURLY: string;
   BID_MIN_SCORE: string;
+  // Потолки фазы 0 (см. getConfig): гейты конкуренции и бюджета.
+  PHASE_MAX_BIDS: string;
+  PHASE_BUDGET_FIXED_USD: string;
+  PHASE_BUDGET_HOURLY_USD: string;
 }

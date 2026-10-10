@@ -316,21 +316,14 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   // Кодовый пересчёт value_score — LLM-арифметике не доверяем.
   // bid_amount и net_amount — в родной валюте заказа; score считаем в USD-пересчёте.
   //
-  // Цена — ДЕТЕРМИНИРОВАННАЯ формула стратегии первых отзывов (не предложение LLM):
-  // fixed и hourly: max(низ вилки; средняя конкурентная ставка × 0.65) — низкая
-  // цена, но не ниже дна вилки (платформа ниже дна всё равно не примет, а битую
-  // ставку генерировать незачем). bid_avg приходит в USD — пересчитываем в родную
-  // валюту тем же курсом из бюджета. Ставок ещё нет (bid_avg = null) — низ вилки.
+  // Цена — ДЕТЕРМИНИРОВАННАЯ формула стратегии фазы 0 (не предложение LLM):
+  // ставка ВСЕГДА = низ вилки (снеп к сетке). Стратегия первых отзывов: бидимся
+  // на всё, на что фрилансеры с отзывами не пойдут; bid_avg в цене не участвует.
   let valueScore = 0;
   if (s.verdict === "BID" && bid > 0) {
     let target = bid;
     if (order.budget_min_original > 0) {
-      if (order.bid_avg != null && order.bid_avg > 0) {
-        // bid_avg в USD, rate = родная валюта за 1 USD → умножаем.
-        target = Math.max(order.budget_min_original, order.bid_avg * rate * 0.65);
-      } else {
-        target = order.budget_min_original;
-      }
+      target = order.budget_min_original;
     }
     bid = roundBid(target);
     // Sanity-кап: не выше 150% верха вилки (страховка, в норме не срабатывает).
@@ -684,14 +677,35 @@ export async function generateBidText(
   env: Env,
   order: Order,
   messages: { role: string; content: string }[]
-): Promise<string> {
+): Promise<string | null> {
   let ctx: OrderContext | null = null;
   try {
     ctx = await loadOrderContext(env, order.id);
   } catch (e) {
     console.warn("generateBidText: loadOrderContext failed", String(e));
   }
-  let text = sanitizeBidText(await chat(env, messages));
+  // Черновик: до 2 попыток — если chat бросил исключение ИЛИ вернул
+  // пустой/пробельный текст, одна повторная попытка. После второй неудачи —
+  // null (заказ пропускается, bids не тратятся).
+  let draft: string | null = null;
+  for (let attempt = 0; attempt < 2 && draft === null; attempt++) {
+    try {
+      const raw = await chat(env, messages);
+      const text = sanitizeBidText(raw);
+      if (text.length > 0) {
+        draft = text;
+      } else {
+        console.warn("generateBidText: draft pass returned empty text", {
+          id: order.id,
+          attempt: attempt + 1,
+        });
+      }
+    } catch (e) {
+      console.warn("generateBidText: draft pass failed:", String(e));
+    }
+  }
+  if (draft === null) return null;
+  let text = draft;
   // Второй проход: humanize-редактура по rules/humanize.md. Сбой не фатален —
   // отправляем черновик первого прохода без редактуры. Весь диалог humanize
   // сохраняется: повторные прогоны ужимки идут в ТОМ ЖЕ контексте — кэш-попадание,

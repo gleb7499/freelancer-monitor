@@ -1,6 +1,6 @@
 // Виртуальная приёмка логики перед live-режимом.
 // Запуск: npm run acceptance
-import { normalizeScore, validateScore, sanitizeBidText, capBidText } from "../src/kimi";
+import { normalizeScore, validateScore, sanitizeBidText, capBidText, generateBidText } from "../src/kimi";
 import { isAwarded } from "../src/milestones";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, mapUsersResponse, CRYPTO_SKILL_ID } from "../src/enrich";
 import { parseFeedBody, mapFeedItem, mapCardToProject } from "../src/sources/freelancer-active";
@@ -10,7 +10,7 @@ import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
 import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
-import { runWithConcurrency } from "../src/index";
+import { runWithConcurrency, bySubmitTsDesc } from "../src/index";
 import { buildBidBody, placeBid } from "../src/bidder";
 import { buySealedUpgrade } from "../src/payments";
 import type { Order } from "../src/types";
@@ -87,7 +87,15 @@ function makeScore(partial: Record<string, unknown>) {
   };
 }
 
-const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
+const cfg = {
+  targetHourly: 20,
+  bidMinScore: 10,
+  weeklyLimitHours: 40,
+  // Потолки фазы 0 (как в wrangler.toml).
+  phaseMaxBids: 10,
+  phaseBudgetFixedUsd: 50,
+  phaseBudgetHourlyUsd: 10,
+} as any;
 
 // ---------- A. normalizeScore: округление сетки (без пола/капа: нулевой бюджет) ----------
 {
@@ -126,12 +134,12 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(r.net_amount, 11250, "INR fee 10%");
   // rate = 96.15; net_usd = 11250/96.15 = 117.0; /24/20*100 = 24.4 -> 24
   eq(r.value_score, 24, "INR value_score USD recalc (low is expected)");
-  // bid_avg в USD: 100×96.15×0.65 = 6250 < низа вилки → низ вилки.
+  // bid_avg игнорируется кодом (фаза 0: ставка — всегда низ вилки).
   const r2 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 24, }), { ...o, bid_avg: 100 }, cfg);
-  eq(r2.bid_amount, 12500, "INR avg x 0.65 below bottom -> bottom");
-  // bid_avg 260 USD: 260×96.15×0.65 = 16251 > низа → снеп (шаг 100) 16300.
+  eq(r2.bid_amount, 12500, "INR bid_avg ignored -> bottom");
+  // bid_avg 260 USD — тоже низ вилки.
   const r3 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 24 }), { ...o, bid_avg: 260 }, cfg);
-  eq(r3.bid_amount, 16300, "INR avg x 0.65 above bottom -> formula snapped");
+  eq(r3.bid_amount, 12500, "INR high bid_avg still ignored -> bottom");
 }
 
 // ---------- C2. детерминированная формула цены (USD) ----------
@@ -139,16 +147,16 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   const o = makeOrder({ budget_min: 100, budget_max: 500, budget_min_original: 100, budget_max_original: 500 });
   // нет ставок → низ вилки.
   eq(normalizeScore(makeScore({ bid_amount: 999 }), o, cfg).bid_amount, 100, "price: no bids -> bottom");
-  // avg 400 x 0.65 = 260 > низа → 260.
-  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 400 }, cfg).bid_amount, 260, "price: avg*0.65 above bottom -> 260");
-  // avg 120 x 0.65 = 78 < низа 100 → 100.
-  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 120 }, cfg).bid_amount, 100, "price: avg*0.65 below bottom -> bottom 100");
-  // hourly — та же формула; снеп сетки кратен 5.
+  // bid_avg игнорируется: высокая средняя ставка не поднимает цену.
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 400 }, cfg).bid_amount, 100, "price: bid_avg ignored -> bottom 100");
+  // низкая средняя ставка тоже не опускает ниже дна вилки (и без того дно).
+  eq(normalizeScore(makeScore({ bid_amount: 999 }), { ...o, bid_avg: 120 }, cfg).bid_amount, 100, "price: low bid_avg ignored -> bottom 100");
+  // hourly — тот же принцип; снеп сетки кратен 5.
   const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
   eq(normalizeScore(makeScore({ bid_amount: 99 }), oh, cfg).bid_amount, 15, "price hourly: no bids -> bottom");
-  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 20, "price hourly: max(15, 19.5) -> snap 20");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 15, "price hourly: bid_avg ignored -> bottom 15");
   const oh2 = makeOrder({ type: "hourly", budget_min: 12, budget_max: 25, budget_min_original: 12, budget_max_original: 25 });
-  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 15, "price hourly: max(12, 13) -> snap 15");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 10, "price hourly: bid_avg ignored -> snap 10");
 }
 
 // ---------- C3. план этапов: валидация LLM-плана ----------
@@ -215,12 +223,12 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   eq(r.bid_amount, 100, "LLM plan: bid recalculated by code (bottom of range)");
   eq(r.milestones?.length, 2, "LLM plan: 2 milestones kept");
   eq(r.milestones![0].amount, 30, "LLM plan: first amount 30% of bid 100");
-  // bid_avg 400 -> target 260 -> ставка 260: 30% = 78, остаток = 182.
+  // bid_avg 400 игнорируется -> ставка = низ вилки 100: 30% = 30, остаток = 70.
   const r2 = normalizeScore(makeScore({ bid_amount: 1, ai_hours: 5, milestones: llm }), { ...o, bid_avg: 400 }, cfg);
-  eq(r2.bid_amount, 260, "LLM plan: bid from deterministic formula");
+  eq(r2.bid_amount, 100, "LLM plan: bid from deterministic formula");
   const sum2 = r2.milestones!.reduce((a, m) => a + m.amount, 0);
   eq(sum2, r2.bid_amount, "LLM plan: sum of milestones equals bid exactly");
-  eq(r2.milestones![1].amount, 182, "LLM plan: last milestone is the remainder");
+  eq(r2.milestones![1].amount, 70, "LLM plan: last milestone is the remainder");
   // Описания санитайзятся: юникод-тире -> дефис.
   const dash = [
     { description: "Setup — kickoff", share: 30 },
@@ -238,7 +246,7 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   const r4 = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, milestones: short }), o, cfg);
   eq(r4.milestones![0].description, "Project setup and kickoff", "LLM plan: sanitized-short description replaced with fallback");
   // Фолбэк по размеру: невалидный LLM-план (сумма 90) -> кодовая схема.
-  // bottom 100, avg 250 -> max(100, 162.5) = 162.5 -> снеп 160 -> net 144 < $200 -> [30, 70].
+  // Ставка — низ вилки (bid_avg игнорируется): bottom 100 -> net 90 < $200 -> [30, 70].
   const caseOf = (bottom: number, bidAvg: number, milestones: unknown) =>
     normalizeScore(makeScore({ bid_amount: 1, ai_hours: 10, milestones }), makeOrder({
       budget_min: bottom, budget_max: 5000, budget_min_original: bottom, budget_max_original: 5000,
@@ -247,11 +255,13 @@ const cfg = { targetHourly: 20, bidMinScore: 10, weeklyLimitHours: 40 } as any;
   const badPlan = [{ description: "Project setup and kickoff", share: 30 }, { description: "Final delivery and handover", share: 60 }];
   const f1 = caseOf(100, 250, badPlan);
   eq(f1.milestones!.map((m) => m.description), ["Project setup and kickoff", "Final delivery and handover"], "fallback < $200: descriptions");
-  eq(f1.milestones!.map((m) => m.amount), [48, 112], "fallback < $200: 30/70 of bid 160");
+  eq(f1.milestones!.map((m) => m.amount), [30, 70], "fallback < $200: 30/70 of bid 100");
   const f2 = caseOf(300, 800, null);
+  eq(f2.bid_amount, 300, "fallback $200-1000: bid = bottom 300 (bid_avg ignored)");
   eq(f2.milestones!.length, 3, "fallback $200-1000: 3 stages");
   eq(f2.milestones![2].description, "Final delivery and handover", "fallback $200-1000: last description");
   const f3 = caseOf(1200, 3000, null);
+  eq(f3.bid_amount, 1200, "fallback > $1000: bid = bottom 1200 (bid_avg ignored)");
   eq(f3.milestones!.length, 4, "fallback > $1000: 4 stages");
   const sum3 = f3.milestones!.reduce((a, m) => a + m.amount, 0);
   eq(sum3, f3.bid_amount, "fallback: sum of milestones equals bid exactly");
@@ -767,30 +777,46 @@ async function testPortfolio() {
   globalThis.fetch = realFetch;
 }
 
-// ---------- K2. пре-гейт до LLM ----------
+// ---------- K2. пре-гейт до LLM (потолки фазы 0) ----------
 {
-  const base = makeOrder({});
-  eq(preBidRejectReason(base), null, "pregate: clean order passes");
+  const base = makeOrder({ budget_min: 50, budget_min_original: 50 });
+  eq(preBidRejectReason(base, cfg), null, "pregate: clean order passes");
   eq(
-    preBidRejectReason(makeOrder({ upgrades: { fulltime: false, featured: false, sealed: false, NDA: false, urgent: false, recruiter: true } })),
+    preBidRejectReason(makeOrder({ upgrades: { fulltime: false, featured: false, sealed: false, NDA: false, urgent: false, recruiter: true } }), cfg),
     "rej:recruiter",
     "pregate: recruiter rejected",
   );
   eq(
-    preBidRejectReason(makeOrder({ is_seller_kyc_required: true })),
+    preBidRejectReason(makeOrder({ is_seller_kyc_required: true }), cfg),
     "rej:kyc-required",
     "pregate: kyc required rejected",
   );
   eq(
-    preBidRejectReason(makeOrder({ client: { payment_verified: null, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, CRYPTO_SKILL_ID] } })),
+    preBidRejectReason(makeOrder({ client: { payment_verified: null, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, CRYPTO_SKILL_ID] } }), cfg),
     "rej:crypto-verified",
     "pregate: crypto skill rejected",
   );
   eq(
-    preBidRejectReason(makeOrder({ client: { payment_verified: true, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, 1031] } })),
+    preBidRejectReason(makeOrder({ budget_min: 50, budget_min_original: 50, client: { payment_verified: true, deposit_made: null, email_verified: null, phone_verified: null, rating: null, review_count: null, registered_ts: null, country: null, open_projects: null, skill_ids: [9, 1031] } }), cfg),
     null,
     "pregate: non-crypto skills pass",
   );
+  // Гейт конкуренции: границы порога (потолок 10 откликов).
+  eq(preBidRejectReason(makeOrder({ bids: 10, budget_min: 50, budget_min_original: 50 }), cfg), null, "pregate: bids = 10 passes");
+  eq(preBidRejectReason(makeOrder({ bids: 11 }), cfg), "rej:hot-competition", "pregate: bids = 11 rejected");
+  // Бюджетный гейт fixed: дно вилки > $50 — отказ; 50 проходит; 0 (неизвестно) — пропуск.
+  eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 50 }), cfg), null, "pregate: fixed budget_min = 50 passes");
+  eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 51 }), cfg), "rej:budget-fixed", "pregate: fixed budget_min = 51 rejected");
+  eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 0, budget_min_original: 0 }), cfg), null, "pregate: fixed budget_min = 0 (unknown) passes");
+  // Бюджетный гейт hourly: ставка > $10/ч — отказ; границы.
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 10, budget_min_original: 10 }), cfg), null, "pregate: hourly budget_min = 10 passes");
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 10.5, budget_min_original: 10.5 }), cfg), "rej:budget-hourly", "pregate: hourly budget_min = 10.5 rejected");
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 0, budget_min_original: 0 }), cfg), null, "pregate: hourly budget_min = 0 (unknown) passes");
+  // Пороги берутся из настроек: при потолке 5 откликов bids = 6 уже отказ.
+  const cfgTight = { ...cfg, phaseMaxBids: 5, phaseBudgetFixedUsd: 30, phaseBudgetHourlyUsd: 8 };
+  eq(preBidRejectReason(makeOrder({ bids: 6 }), cfgTight), "rej:hot-competition", "pregate: threshold from cfg");
+  eq(preBidRejectReason(makeOrder({ type: "fixed", budget_min: 31 }), cfgTight), "rej:budget-fixed", "pregate: fixed threshold from cfg");
+  eq(preBidRejectReason(makeOrder({ type: "hourly", budget_min: 9 }), cfgTight), "rej:budget-hourly", "pregate: hourly threshold from cfg");
 }
 
 // ---------- L3. fetchOrderArtifacts (mock fetch) ----------
@@ -1077,6 +1103,79 @@ async function testBidderPayments() {
   globalThis.fetch = realFetch;
 }
 
+// ---------- Q. сортировка заказов к скорингу: свежие первыми ----------
+{
+  const o1 = makeOrder({ id: 1, submit_ts: 100 });
+  const o2 = makeOrder({ id: 2, submit_ts: 300 });
+  const o3 = makeOrder({ id: 3, submit_ts: 200 });
+  const sorted = [o1, o2, o3].sort(bySubmitTsDesc);
+  eq(sorted.map((o) => o.id), [2, 3, 1], "sort: submit_ts desc (fresh first)");
+  eq(bySubmitTsDesc(o1, o1), 0, "sort: equal ts -> 0");
+}
+
+// ---------- R. generateBidText: повторная попытка при пустом/павшем черновике ----------
+async function testGenerateBidText() {
+  const realFetch = globalThis.fetch;
+  const store = new Map<string, string>();
+  const env = {
+    KIMI_API_BASE: "https://api.kimi.ai/coding/v1",
+    KIMI_MODEL: "kimi-for-coding",
+    KIMI_API_KEY: "test-key",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _o?: unknown) => void store.set(k, v),
+    },
+  } as any;
+  const order = makeOrder({ id: 888 });
+  const messages = [{ role: "user", content: "draft" }];
+  const reply = (content: string) =>
+    new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+
+  // 1) первый ответ пустой -> повторный вызов; второй валидный -> текст получен.
+  // Всего 3 вызова: 2 черновик + 1 humanize-проход.
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return reply(calls === 1 ? "   " : "Solid draft for the client.");
+  }) as any;
+  const r1 = await generateBidText(env, order, messages);
+  eq(calls, 3, "bidtext: empty first reply -> one retry, then humanize pass");
+  eq(r1, "Solid draft for the client.", "bidtext: retry draft returned");
+
+  // 2) первый вызов бросает (сеть) -> повторный; второй валидный.
+  calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 1) throw new Error("net down");
+    return reply("Recovered draft.");
+  }) as any;
+  const r2 = await generateBidText(env, order, messages);
+  eq(calls, 3, "bidtext: thrown first call -> one retry, then humanize pass");
+  eq(r2, "Recovered draft.", "bidtext: retry after exception returned");
+
+  // 3) два пустых ответа -> null (заказ пропускается).
+  calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return reply("");
+  }) as any;
+  const r3 = await generateBidText(env, order, messages);
+  eq(calls, 2, "bidtext: two empty replies -> exactly two attempts");
+  eq(r3, null, "bidtext: two empty replies -> null");
+
+  // 4) два исключения -> null.
+  calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    throw new Error("net down");
+  }) as any;
+  const r4 = await generateBidText(env, order, messages);
+  eq(calls, 2, "bidtext: two thrown calls -> exactly two attempts");
+  eq(r4, null, "bidtext: two exceptions -> null");
+
+  globalThis.fetch = realFetch;
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -1087,6 +1186,7 @@ async function testBidderPayments() {
   await testSponsoredDaily();
   await testBidderPayments();
   await testSearchChannel();
+  await testGenerateBidText();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

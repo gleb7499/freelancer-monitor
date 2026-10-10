@@ -39,3 +39,7 @@ FREELANCER_API_BASE = "https://www.freelancer.com/api/projects/0.1"
 DEFAULT_WEEKLY_LIMIT = "40"
 TARGET_HOURLY = "20"
 BID_MIN_SCORE = "10"
+# Потолки фазы 0 (первые отзывы): гейты конкуренции и бюджета.
+PHASE_MAX_BIDS = "10"
+PHASE_BUDGET_FIXED_USD = "50"
+PHASE_BUDGET_HOURLY_USD = "10"
