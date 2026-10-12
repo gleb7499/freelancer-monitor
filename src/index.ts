@@ -874,7 +874,7 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
 // DO однопоточный: тики не перекрываются, следующий аларм ставится
 // по завершении предыдущего. Cron (1/мин) — сторож: будит DO, если цепочка
 // прервалась (деплой, ошибка инфраструктуры).
-const TICK_INTERVAL_MS = 20_000;
+const TICK_INTERVAL_MS = 10_000;
 
 export class TickScheduler {
   constructor(

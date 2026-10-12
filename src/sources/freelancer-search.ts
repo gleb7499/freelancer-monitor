@@ -13,10 +13,10 @@ import {
 // и без кук отдаёт 200 и полный JSON; элементы — полные карточки (37 полей),
 // дозаполнение по id не нужно. Те же 11 скиллов, что у ленты и saved search.
 // Курсор — по submitdate элемента (unix sec), опрос каждый тик DO (10 с),
-// throttle защищает от двойных запросов внутри тика.
+// throttle (5 с) защищает от двойных запросов внутри длинного тика.
 const SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
 const FETCH_TIMEOUT_MS = 15000;
-const POLL_MIN_INTERVAL_MS = 10_000;
+const POLL_MIN_INTERVAL_MS = 5_000;
 const CURSOR_KEY = "search:last_submit";
 const LAST_FETCH_KEY = "search:last_fetch";
 // Лимит страницы поиска — защита от всплеска выдачи.

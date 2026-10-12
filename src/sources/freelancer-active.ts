@@ -12,12 +12,13 @@ import {
 // Закрытый intake: веб-лента navigation/project-feed/pre-populated.php
 // (эмуляция фронта заголовком freelancer-auth-v2, без кук). Те же 11 скиллов,
 // что у saved search «Main Search». Курсор — по time элемента ленты (unix sec).
-// Опрос — каждый тик DO (10 с); throttle защищает от двойных запросов внутри тика.
+// Опрос — каждый тик DO (10 с); throttle (5 с) защищает от двойных запросов
+// внутри длинного тика и от частоты выше разумной для платформы.
 // Новые элементы ленты — компактные; полные карточки догружаются из
 // projects/0.1/projects (mapCardToProject) и нормализуются через normalizeProject.
 const SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
 const FETCH_TIMEOUT_MS = 15000;
-const POLL_MIN_INTERVAL_MS = 10_000;
+const POLL_MIN_INTERVAL_MS = 5_000;
 const CURSOR_KEY = "active:last_submit";
 const LAST_FETCH_KEY = "active:last_fetch";
 // Максимум карточек за тик — защита от всплеска ленты.
