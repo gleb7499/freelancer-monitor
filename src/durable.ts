@@ -1,4 +1,5 @@
 import type { Env, Order, ScoreResult } from "./types";
+import { DurableObject } from "cloudflare:workers";
 import { getConfig, type Config } from "./config";
 import { channelById, type ChannelId } from "./channels";
 import { fetchActiveOrders, type ChannelState } from "./sources/freelancer-active";
@@ -133,11 +134,10 @@ export function channelRunnerStub(env: Env, id: ChannelId): ChannelRunnerStub {
 // ChannelRunner: один инстанс на канал (имя = ChannelId), alarm-цепочка тиков.
 // ---------------------------------------------------------------------------
 
-export class ChannelRunner {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Env,
-  ) {}
+export class ChannelRunner extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+  }
 
   private get channelId(): ChannelId {
     return this.ctx.id.name as ChannelId;
@@ -336,11 +336,10 @@ export class ChannelRunner {
 
 const SEEN_RETENTION_MS = 30 * 86400 * 1000;
 
-export class OrdersBank {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Env,
-  ) {}
+export class OrdersBank extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+  }
 
   // Сторож: запускает суточную чистку, если alarm-цепочка не жива.
   async wake(): Promise<void> {
@@ -401,11 +400,10 @@ const EMPTY_BUDGET: BudgetData = {
   balanceCache: { value: null, ts: 0 },
 };
 
-export class BidBudget {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Env,
-  ) {}
+export class BidBudget extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+  }
 
   // Сторож: запускает чистку протухших резервов, если цепочка не жива.
   async wake(): Promise<void> {
