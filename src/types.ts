@@ -1,3 +1,5 @@
+import type { ProfileId } from "./channels";
+
 export interface Order {
   platform: "freelancer";
   niche_id: string;
@@ -34,7 +36,11 @@ export interface Order {
     recruiter: boolean;
   };
   prepaid_milestone: boolean;
-  source?: "active";
+  // Intake-источник: "feed" | "search:main" | "search:android".
+  source?: string;
+  // Канал отклика: профиль "main"/"android" для заказа из выделенного поиска;
+  // null/undefined — общая лента feed, профиль выбирает LLM при скоринге.
+  channel?: ProfileId | null;
   // Распарсенные материалы заказа: вложения (текстовые) и страницы по ссылкам
   // из описания (fetchOrderArtifacts). LLM обязана учитывать при скоринге и в
   // тексте отклика. Бинарники (PDF/DOCX) — плейсхолдером без текста.
@@ -49,6 +55,8 @@ export interface Hours {
 
 export interface ScoreResult {
   verdict: "BID" | "PASS";
+  // Выбранный (feed) или назначенный кодом (выделенный канал) профиль.
+  profile: ProfileId;
   reason: string;
   summary_ru: string;
   hours: Hours;
@@ -101,7 +109,6 @@ export interface Env {
   // Задаётся только в .dev.vars, в проде отсутствует.
   DEV_MARKER?: string;
   ADMIN_TOKEN: string;
-  TICK_SCHEDULER: DurableObjectNamespace;
   FREELANCER_API_BASE: string;
   DEFAULT_WEEKLY_LIMIT: string;
   FL_USER_ID: string;
@@ -116,4 +123,10 @@ export interface Env {
   PHASE_MAX_BIDS: string;
   PHASE_BUDGET_FIXED_USD: string;
   PHASE_BUDGET_HOURLY_USD: string;
+  // "1" — включить Android-канал (профиль 35766270). В проде отсутствует.
+  CHANNEL_ANDROID_ENABLED?: string;
+  // Дurable Objects новой архитектуры каналов (классы добавляет отдельный агент).
+  CHANNEL_RUNNER: DurableObjectNamespace;
+  ORDERS_BANK: DurableObjectNamespace;
+  BIDS_BUDGET: DurableObjectNamespace;
 }

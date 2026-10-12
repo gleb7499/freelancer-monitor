@@ -9,9 +9,12 @@ import {
   WEB_USER_AGENT,
 } from "../web-auth";
 
-// Закрытый intake: веб-лента navigation/project-feed/pre-populated.php
-// (эмуляция фронта заголовком freelancer-auth-v2, без кук). Те же 11 скиллов,
-// что у saved search «Main Search». Курсор — по time элемента ленты (unix sec).
+// Закрытый intake общего feed-канала: веб-лента
+// navigation/project-feed/pre-populated.php (эмуляция фронта заголовком
+// freelancer-auth-v2, без кук). Скиллы ниже — параметры самого эндпоинта
+// ленты (jobIds[]), а не фильтр поиска; source у заказов ленты — "feed",
+// order.channel не заполняется (null — профиль выбирает LLM при скоринге).
+// Курсор — по time элемента ленты (unix sec).
 // Опрос — каждый тик DO (10 с); throttle (5 с) защищает от двойных запросов
 // внутри длинного тика и от частоты выше разумной для платформы.
 // Новые элементы ленты — компактные; полные карточки догружаются из
@@ -28,6 +31,22 @@ export interface ActiveOrdersResult {
   orders: Order[];
   skipped: boolean;
   error: string | null;
+}
+
+// Адаптер хранилища состояния канала (курсоры, throttle). По умолчанию —
+// обёртка над env.ORDERS_KV; ChannelRunner передаёт адаптер над своим
+// ctx.storage, чтобы состояние канала жило в рамках его потока (DO).
+export interface ChannelState {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, ttlSec?: number): Promise<void>;
+}
+
+export function kvChannelState(env: Env): ChannelState {
+  return {
+    get: (key) => env.ORDERS_KV.get(key),
+    put: (key, value, ttlSec) =>
+      env.ORDERS_KV.put(key, value, ttlSec !== undefined ? { expirationTtl: ttlSec } : undefined),
+  };
 }
 
 // Массив элементов ленты из тела ответа. Защищённо принимает конверт
@@ -143,7 +162,7 @@ async function fetchCard(env: Env, auth: { userId: string; hash: string }, id: n
   return mapCardToProject(projects[0]);
 }
 
-export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
+export async function fetchActiveOrders(env: Env, state: ChannelState = kvChannelState(env)): Promise<ActiveOrdersResult> {
   const empty: ActiveOrdersResult = { orders: [], skipped: false, error: null };
 
   const auth = await resolveWebAuth(env);
@@ -153,19 +172,19 @@ export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
 
   // Throttle: защита от повторного запроса внутри одного тика (DO тикает каждые 10 с).
   try {
-    const lastFetchRaw = await env.ORDERS_KV.get(LAST_FETCH_KEY);
+    const lastFetchRaw = await state.get(LAST_FETCH_KEY);
     const lastFetch = lastFetchRaw === null ? 0 : Number(lastFetchRaw);
     if (Number.isFinite(lastFetch) && Date.now() - lastFetch < POLL_MIN_INTERVAL_MS) {
       return { ...empty, skipped: true };
     }
-    await env.ORDERS_KV.put(LAST_FETCH_KEY, String(Date.now()), { expirationTtl: 86400 });
+    await state.put(LAST_FETCH_KEY, String(Date.now()), 86400);
   } catch (e) {
     console.warn("active throttle check failed:", e);
   }
 
   let cursorRaw: string | null = null;
   try {
-    cursorRaw = await env.ORDERS_KV.get(CURSOR_KEY);
+    cursorRaw = await state.get(CURSOR_KEY);
   } catch (e) {
     console.warn("active cursor read failed:", e);
   }
@@ -236,7 +255,7 @@ export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
   for (const item of fresh.slice(0, MAX_CARDS_PER_TICK)) {
     const card = await fetchCard(env, auth, item.id);
     if (card === null) continue;
-    const order = normalizeProject(card, "active");
+    const order = normalizeProject(card, "feed");
     // Паритет с бывшим фильтром languages[]=en: не-английские заказы
     // не скорим (LLM-правила и так дали бы PASS, но квота не бесконечна).
     if (order.language !== "en") {
@@ -261,7 +280,7 @@ export async function fetchActiveOrders(env: Env): Promise<ActiveOrdersResult> {
   // Курсор двигаем только при росте — иначе 1440 put/сутки (KV).
   if (maxSubmit > lastSubmit) {
     try {
-      await env.ORDERS_KV.put(CURSOR_KEY, String(maxSubmit), { expirationTtl: 7 * 86400 });
+      await state.put(CURSOR_KEY, String(maxSubmit), 7 * 86400);
     } catch (e) {
       console.warn("active cursor put failed:", e);
     }

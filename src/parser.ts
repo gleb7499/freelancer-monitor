@@ -38,7 +38,9 @@ function originalAmount(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-export function normalizeProject(project: FreelancerProject, nicheId: string): Order {
+// source — строка-метка канала-поступления заказа:
+// "feed" (общая лента), "search:main", "search:android" (каналы поиска).
+export function normalizeProject(project: FreelancerProject, source: string): Order {
   const currency = project.budget?.currency ?? project.currency;
   const exchangeRate =
     currency && currency.code !== "USD" && typeof currency.exchange_rate === "number"
@@ -58,7 +60,7 @@ export function normalizeProject(project: FreelancerProject, nicheId: string): O
 
   return {
     platform: "freelancer",
-    niche_id: nicheId,
+    niche_id: source,
     id: project.id,
     title: project.title ?? "",
     url: `https://www.freelancer.com/projects/${project.seo_url ?? ""}`,
@@ -94,6 +96,6 @@ export function normalizeProject(project: FreelancerProject, nicheId: string): O
       recruiter: bool("recruiter"),
     },
     prepaid_milestone: !!project.active_prepaid_milestone,
-    source: "active",
+    source,
   };
 }

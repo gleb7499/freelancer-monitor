@@ -3,7 +3,6 @@ import { getConfig, type Config } from "./config";
 import {
   buildScoringSystemPrompt,
   SCORING_JSON_SCHEMA,
-  BID_TEXT_SYSTEM_PROMPT,
   BID_TEXT_MAX_CHARS,
   HUMANIZE_SYSTEM_PROMPT,
   buildScoringUserMessage,
@@ -14,11 +13,16 @@ import {
   buildBidPriceNote,
   buildBidUserMessage,
   buildHumanizeLimitMessage,
+  buildProfilesBlock,
+  buildBidTextSystemPrompt,
+  buildChannelNote,
   type ScoringContext,
 } from "./prompts";
 import { getBidsBalance } from "./bids-balance";
 import { sponsoredDailyLeft } from "./upgrades";
 import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
+import type { ProfileId } from "./channels";
+import { filterPortfolioByChannel, profileChannel, ENABLED_PROFILES } from "./channels";
 
 export class KimiError extends Error {
   status?: number;
@@ -137,6 +141,9 @@ export function validateScore(s: any, order: Order): string[] {
   }
   if (s.verdict !== "BID" && s.verdict !== "PASS") {
     errors.push("verdict must be BID or PASS");
+  }
+  if (s.profile !== "main" && s.profile !== "android") {
+    errors.push("profile must be \"main\" or \"android\"");
   }
   if (typeof s.reason !== "string" || s.reason.trim() === "") {
     errors.push("reason must be a non-empty string");
@@ -308,8 +315,25 @@ function feeFor(order: Order, bid: number, rate: number): number {
   return order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5 * rate);
 }
 
-export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
+export function normalizeScore(
+  s: any,
+  order: Order,
+  cfg: Config,
+  env?: Pick<Env, "CHANNEL_ANDROID_ENABLED">,
+): ScoreResult {
   const rate = orderRate(order);
+  // Профиль: выделенный канал решает жёстко; feed — выбор LLM (валидность
+  // уже проверил validateScore), fallback "main" если выбор недоступен/выключен.
+  let profile: ProfileId = "main";
+  if (order.channel === "main" || order.channel === "android") {
+    profile = order.channel;
+  } else {
+    const llmChoice: ProfileId = s.profile === "android" ? "android" : "main";
+    const enabledIds = env
+      ? ENABLED_PROFILES(env).map((ch) => ch.id as ProfileId)
+      : (["main", "android"] as ProfileId[]);
+    profile = enabledIds.includes(llmChoice) ? llmChoice : "main";
+  }
   let bid = s.bid_amount as number;
   let fee = 0;
   let net = 0;
@@ -441,6 +465,7 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
     valueScore = 0;
     return {
       verdict,
+      profile,
       reason: `${s.reason} [код: value_score=${scoreBefore} < ${cfg.bidMinScore}]`,
       summary_ru: s.summary_ru,
       hours: { opt: s.hours.opt, real: s.hours.real, pess: s.hours.pess },
@@ -459,6 +484,7 @@ export function normalizeScore(s: any, order: Order, cfg: Config): ScoreResult {
   }
   return {
     verdict,
+    profile,
     reason: s.reason,
     summary_ru: s.summary_ru,
     hours: { opt: s.hours.opt, real: s.hours.real, pess: s.hours.pess },
@@ -514,7 +540,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     console.warn("scoreOrder: sponsored daily limit unavailable", String(e));
   }
   const messages = [
-    { role: "system", content: buildScoringSystemPrompt(cfg) },
+    { role: "system", content: buildScoringSystemPrompt(cfg, buildProfilesBlock(env)) },
     { role: "user", content: buildScoringUserMessage(order, bidsCtx) },
   ];
   let useSchema = !jsonSchemaDegraded;
@@ -538,7 +564,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
   }
   let errors = parsed === undefined ? ["response is not valid JSON"] : validateScore(parsed, order);
   if (errors.length === 0) {
-    const result = normalizeScore(parsed, order, cfg);
+    const result = normalizeScore(parsed, order, cfg, env);
     await updateOrderContext(env, order.id, { order, score: result });
     return result;
   }
@@ -591,7 +617,7 @@ export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | 
     });
     return null;
   }
-  const result = normalizeScore(parsed, order, cfg);
+  const result = normalizeScore(parsed, order, cfg, env);
   await updateOrderContext(env, order.id, { order, score: result });
   return result;
 }
@@ -602,14 +628,22 @@ export function buildBidMessages(
   portfolio?: import("./enrich").PortfolioInfo | null
 ): { role: string; content: string }[] {
   const notes: string[] = [];
+  // LLM пишет от имени конкретного профиля — его описание идёт первым.
+  notes.unshift(buildChannelNote(score.profile));
   if (order.type === "hourly" && score.weekly_limit_hours !== null) {
     notes.push(buildBidWeeklyNote(score.weekly_limit_hours));
   }
   if (portfolio && portfolio.items.length > 0) {
-    const lines = portfolio.items
-      .map((it) => `- ${it.title}: ${it.description}`)
-      .join("\n");
-    notes.push(buildBidPortfolioNote(lines));
+    const items = filterPortfolioByChannel(
+      portfolio.items,
+      profileChannel(score.profile),
+    );
+    if (items.length > 0) {
+      const lines = items
+        .map((it) => `- ${it.title}: ${it.description}`)
+        .join("\n");
+      notes.push(buildBidPortfolioNote(lines));
+    }
   }
   if (score.milestones && score.milestones.length > 0) {
     const lines = score.milestones
@@ -622,7 +656,7 @@ export function buildBidMessages(
   }
   notes.push(buildBidPriceNote(score.bid_amount, order.currency_code));
   return [
-    { role: "system", content: BID_TEXT_SYSTEM_PROMPT },
+    { role: "system", content: buildBidTextSystemPrompt(score.profile) },
     {
       role: "user",
       content: buildBidUserMessage(

@@ -18,12 +18,23 @@ database_name = "freelancer-monitor"
 database_id = "d57b5e01-e517-4b7e-8e7a-cc3e4dae479a"
 
 [durable_objects]
-bindings = [{ name = "TICK_SCHEDULER", class_name = "TickScheduler" }]
+bindings = [
+  { name = "CHANNEL_RUNNER", class_name = "ChannelRunner" },
+  { name = "ORDERS_BANK", class_name = "OrdersBank" },
+  { name = "BIDS_BUDGET", class_name = "BidBudget" },
+]
 
-# Миграция класса Durable Object (не путать с migrations/ — те для D1).
+# Миграции классов Durable Object (append-only, не путать с migrations/ — те для D1).
+# v1: TickScheduler (архитектура единого тика) — класс удалён из кода вместе
+# с binding; запись в истории миграций остаётся.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TickScheduler"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ChannelRunner", "OrdersBank", "BidBudget"]
+deleted_classes = ["TickScheduler"]
 
 [triggers]
 crons = ["* * * * *"]

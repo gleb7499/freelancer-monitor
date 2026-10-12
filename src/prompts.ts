@@ -1,4 +1,4 @@
-import type { Order } from "./types";
+import type { Order, Env } from "./types";
 import { RULES_FREELANCER_SELECTION, RULES_BID_SKILL, RULES_HUMANIZE } from "./generated/rules";
 import scoringSystemMd from "../prompts/scoring-system.md";
 import scoringUserMd from "../prompts/scoring-user.md";
@@ -11,6 +11,10 @@ import bidUserMilestonesMd from "../prompts/bid-user-milestones.md";
 import bidUserPriceMd from "../prompts/bid-user-price.md";
 import humanizeSystemMd from "../prompts/humanize-system.md";
 import humanizeLimitMd from "../prompts/humanize-limit.md";
+import channelMainMd from "../prompts/channel-main.md";
+import channelAndroidMd from "../prompts/channel-android.md";
+import type { ProfileId } from "./channels";
+import { ENABLED_PROFILES } from "./channels";
 
 export interface ScoringPromptOptions {
   weeklyLimitHours: number;
@@ -41,13 +45,45 @@ export function fill(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (raw, key: string) => vars[key] ?? raw);
 }
 
-export function buildScoringSystemPrompt(opts: ScoringPromptOptions): string {
+export function buildScoringSystemPrompt(
+  opts: ScoringPromptOptions,
+  profilesBlock: string,
+): string {
   return fill(text(scoringSystemMd), {
     RULES_FREELANCER_SELECTION,
+    PROFILES_BLOCK: profilesBlock,
     BID_MIN_SCORE: String(opts.bidMinScore),
     TARGET_HOURLY: String(opts.targetHourly),
     WEEKLY_LIMIT_HOURS: String(opts.weeklyLimitHours),
   });
+}
+
+// Блок профилей для скоринга: только включённые каналы (kind "search").
+// Содержит инструкцию выбора профиля по полю channel заказа.
+export function buildProfilesBlock(env: Pick<Env, "CHANNEL_ANDROID_ENABLED">): string {
+  const lines: string[] = [];
+  for (const ch of ENABLED_PROFILES(env)) {
+    lines.push(`Profile "${ch.id}" (${ch.label}):`);
+    lines.push(text(ch.id === "main" ? channelMainMd : channelAndroidMd));
+  }
+  lines.push(
+    'The order JSON has "source" and "channel". If "channel" is set (order from a dedicated search channel) — the profile is decided by code, still fill "profile" with your best guess (code overrides). If "channel" is null/absent (shared feed) — choose the best-fitting profile for this order and put its id in "profile". Choose ONLY among the profiles listed above.',
+  );
+  return lines.join("\n");
+}
+
+export function channelProfileMd(profile: ProfileId): string {
+  return text(profile === "main" ? channelMainMd : channelAndroidMd);
+}
+
+// Полный текст профиля для NOTES пользовательского сообщения генератора текста.
+export function buildChannelNote(profile: ProfileId): string {
+  return channelProfileMd(profile);
+}
+
+// Первая строка файла профиля — "STACK: ...".
+export function PROFILE_STACK(profile: ProfileId): string {
+  return channelProfileMd(profile).split("\n", 1)[0];
 }
 
 export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): string {
@@ -70,7 +106,12 @@ export function buildScoringRetryMessage(errors: string[], bidHint: string): str
   return fill(text(scoringRetryMd), { ERRORS: errors.join("; "), BID_HINT: bidHint });
 }
 
-export const BID_TEXT_SYSTEM_PROMPT = fill(text(bidTextSystemMd), { RULES_BID_SKILL });
+export function buildBidTextSystemPrompt(profile: ProfileId): string {
+  return fill(text(bidTextSystemMd), {
+    RULES_BID_SKILL,
+    PROFILE_STACK: PROFILE_STACK(profile),
+  });
+}
 
 export const BID_TEXT_MAX_CHARS = 1500;
 
@@ -118,6 +159,7 @@ export const SCORING_JSON_SCHEMA = {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["BID", "PASS"] },
+      profile: { type: "string", enum: ["main", "android"] },
       reason: { type: "string" },
       summary_ru: { type: "string" },
       hours: {
@@ -158,6 +200,7 @@ export const SCORING_JSON_SCHEMA = {
     },
     required: [
       "verdict",
+      "profile",
       "reason",
       "summary_ru",
       "hours",

@@ -12,6 +12,7 @@ import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } 
 import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency, bySubmitTsDesc } from "../src/index";
 import { buildBidBody, placeBid } from "../src/bidder";
+import { channelById, filterPortfolioByChannel } from "../src/channels";
 import { buySealedUpgrade } from "../src/payments";
 import type { Order } from "../src/types";
 
@@ -83,6 +84,7 @@ function makeScore(partial: Record<string, unknown>) {
     delivery_days: 5,
     deadline_caveat: null,
     take_upgrades: ["sponsored"],
+    profile: "main",
     ...partial,
   };
 }
@@ -319,6 +321,47 @@ const cfg = {
   eq(passZeros, [], "validateScore accepts PASS zeros");
   const dup = validateScore(makeScore({ take_upgrades: ["sponsored", "sponsored"] }), o);
   ok(dup.some((e) => e.includes("duplicates")), "validateScore rejects duplicate upgrades");
+  const noProfile = validateScore({ ...makeScore({}), profile: undefined }, o);
+  ok(noProfile.some((e) => e.includes("profile")), "validateScore requires profile");
+  const badProfile = validateScore(makeScore({ profile: "ios" }), o);
+  ok(badProfile.some((e) => e.includes("profile")), "validateScore rejects unknown profile");
+}
+
+// ---------- H2. выбор профиля: канал vs LLM vs fallback ----------
+{
+  const oFeed = makeOrder({ budget_min: 0, budget_max: 0, budget_min_original: 0, budget_max_original: 0 });
+  const oMain = { ...oFeed, channel: "main" as const };
+  const oAndroid = { ...oFeed, channel: "android" as const };
+  const envOn = { CHANNEL_ANDROID_ENABLED: "1" } as any;
+  const envOff = {} as any;
+
+  eq(normalizeScore(makeScore({ bid_amount: 100 }), oAndroid, cfg, envOff).profile, "android",
+    "profile: канал android переопределяет, даже когда канал выключен в env");
+  eq(normalizeScore(makeScore({ bid_amount: 100, profile: "main" }), oAndroid, cfg, envOn).profile, "android",
+    "profile: канал переопределяет выбор LLM");
+  eq(normalizeScore(makeScore({ bid_amount: 100, profile: "android" }), oMain, cfg, envOn).profile, "main",
+    "profile: канал main переопределяет выбор LLM");
+  eq(normalizeScore(makeScore({ bid_amount: 100, profile: "android" }), oFeed, cfg, envOn).profile, "android",
+    "profile: feed — выбор LLM принимается");
+  eq(normalizeScore(makeScore({ bid_amount: 100, profile: "android" }), oFeed, cfg, envOff).profile, "main",
+    "profile: feed — выбор выключенного канала падает в main");
+  eq(normalizeScore(makeScore({ bid_amount: 100 }), oFeed, cfg, envOff).profile, "main",
+    "profile: feed без выбора LLM -> main");
+}
+
+// ---------- H3. фильтр портфолио по группе канала ----------
+{
+  const items = [
+    { id: 101, title: "A", description: "a" },
+    { id: 102, title: "B", description: "b" },
+    { id: 103, title: "C", description: "c" },
+  ];
+  eq(filterPortfolioByChannel(items, channelById("main")).length, 3,
+    "portfolio: пустая группа канала — все элементы");
+  const ch = { ...channelById("main"), portfolioItemIds: [102, 103] };
+  const filtered = filterPortfolioByChannel(items, ch);
+  eq(filtered.length, 2, "portfolio: фильтр по ids группы");
+  eq(filtered[0].id, 102, "portfolio: порядок сохранён");
 }
 
 // ---------- I. sanitizeBidText ----------
@@ -654,7 +697,7 @@ async function testSearchChannel() {
     );
   }) as any;
 
-  const r = await fetchSearchOrders(env);
+  const r = await fetchSearchOrders(env, channelById("main"));
   eq(r.error, null, "search: канал без ошибок");
   eq(r.orders.length, 2, "search: старый/контест/не-en отфильтрованы");
   eq(r.orders[0] && r.orders[0].id, 1, "search: id сохранён");
@@ -666,18 +709,18 @@ async function testSearchChannel() {
     requestedUrls[0].includes("/api/projects/0.1/projects/active"),
     "search: endpoint projects/active (без двойного api/...)",
   );
-  ok(store.has("search:last_submit"), "search: курсор записан");
-  ok(store.has("search:last_fetch"), "search: throttle записан");
+  ok(store.has("search:main:last_submit"), "search: курсор записан");
+  ok(store.has("search:main:last_fetch"), "search: throttle записан");
 
   // Throttle: повторный вызов в том же тике — skipped, запроса нет.
-  const again = await fetchSearchOrders(env);
+  const again = await fetchSearchOrders(env, channelById("main"));
   eq(again.skipped, true, "search: повторный вызов throttled");
   eq(requestedUrls.length, 1, "search: throttled без запроса");
 
   // Ошибка канала: сеть падает — ошибка возвращается, имя канала в сообщении.
   store.clear();
   globalThis.fetch = (async () => { throw new Error("net down"); }) as any;
-  const down = await fetchSearchOrders(env);
+  const down = await fetchSearchOrders(env, channelById("main"));
   ok(down.error !== null && down.error.includes("search"), "search: ошибка сети -> error с именем канала");
 
   globalThis.fetch = realFetch;
@@ -951,13 +994,16 @@ async function testConcurrencyPool() {
   let maxActive = 0;
   const tasks = Array.from({ length: 12 }, (_, i) => i);
   // Батч из 12 "заказов" при лимите 5: параллелизм реален, но не выше лимита.
-  const out = await runWithConcurrency(tasks, 5, async (i) => {
-    active += 1;
-    maxActive = Math.max(maxActive, active);
-    await delay(15);
-    active -= 1;
-    return i * 2;
-  });
+  const out = await runWithConcurrency(
+    tasks.map((i) => async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await delay(15);
+      active -= 1;
+      return i * 2;
+    }),
+    5,
+  );
   eq(maxActive, 5, "pool: параллелизм доходит до лимита 5");
   eq(out.length, 12, "pool: все задачи обработаны");
   eq(JSON.stringify(out), JSON.stringify(tasks.map((i) => i * 2)), "pool: порядок результатов сохранён");
@@ -965,25 +1011,35 @@ async function testConcurrencyPool() {
   // Лимит 1 — строго последовательно.
   let seq = 0;
   let maxSeq = 0;
-  await runWithConcurrency([1, 2, 3], 1, async () => {
-    seq += 1;
-    maxSeq = Math.max(maxSeq, seq);
-    await delay(5);
-    seq -= 1;
-  });
+  await runWithConcurrency(
+    [1, 2, 3].map(
+      () => async () => {
+        seq += 1;
+        maxSeq = Math.max(maxSeq, seq);
+        await delay(5);
+        seq -= 1;
+      },
+    ),
+    1,
+  );
   eq(maxSeq, 1, "pool: при лимите 1 — последовательно");
 
   // Лимит больше числа задач — пул не плодит лишние воркеры, пустой батч — no-op.
   let peak = 0;
   let a2 = 0;
-  await runWithConcurrency([7, 8], 5, async () => {
-    a2 += 1;
-    peak = Math.max(peak, a2);
-    await delay(5);
-    a2 -= 1;
-  });
+  await runWithConcurrency(
+    [7, 8].map(
+      () => async () => {
+        a2 += 1;
+        peak = Math.max(peak, a2);
+        await delay(5);
+        a2 -= 1;
+      },
+    ),
+    5,
+  );
   eq(peak, 2, "pool: воркеров не больше числа задач");
-  const empty = await runWithConcurrency([], 5, async () => 1);
+  const empty = await runWithConcurrency([], 5);
   eq(empty.length, 0, "pool: пустой батч — пустой результат");
 }
 
@@ -991,7 +1047,7 @@ async function testConcurrencyPool() {
 async function testBidderPayments() {
   const realFetch = globalThis.fetch;
   const score = (milestones: unknown, bid = 260) =>
-    ({ bid_amount: bid, delivery_days: 5, milestones } as any);
+    ({ bid_amount: bid, delivery_days: 5, milestones, profile: "main" } as any);
   const ms = [
     { description: "Project setup and kickoff", amount: 78 },
     { description: "Final delivery and handover", amount: 182 },
@@ -999,14 +1055,16 @@ async function testBidderPayments() {
 
   // buildBidBody: milestone_percentage 50 при 2+ этапах, 100 без плана;
   // showcases всегда []; bidder_id — из веб-авторизации.
-  const body2 = buildBidBody(42, 94242579, "Bid text", score(ms));
+  const body2 = buildBidBody(42, 94242579, "Bid text", score(ms), 31216034);
   eq(body2.milestone_percentage, 50, "bid body: 50 with 2+ milestones");
   eq(body2.showcases, [], "bid body: showcases always empty");
   eq(body2.bidder_id, 94242579, "bid body: bidder_id");
   eq(body2.project_id, 42, "bid body: project_id");
   eq(body2.amount, 260, "bid body: amount from score");
-  const bodyNull = buildBidBody(42, 94242579, "Bid text", score(null));
+  eq(body2.profile_id, 31216034, "bid body: profile_id when resolved");
+  const bodyNull = buildBidBody(42, 94242579, "Bid text", score(null), null);
   eq(bodyNull.milestone_percentage, 100, "bid body: 100 without milestones");
+  ok(!("profile_id" in bodyNull), "bid body: no profile_id when unresolved");
 
   // Окружение placeBid: режим live, веб-сессия в KV, D1-заглушка для леджера.
   const store = new Map<string, string>([
@@ -1065,6 +1123,7 @@ async function testBidderPayments() {
   eq(bidReq?.body.bidder_id, 94242579, "placeBid: bid body bidder_id from web auth");
   eq(bidReq?.body.showcases, [], "placeBid: bid body showcases empty");
   eq(bidReq?.headers["freelancer-auth-v2"], "94242579;test-hash", "placeBid: web auth header sent");
+  eq(bidReq?.body.profile_id, 31216034, "placeBid: profile_id resolved via profileIdHint");
 
   const msReqs = requests.filter((r) => r.url.includes("/milestone_requests/"));
   eq(msReqs.length, 2, "placeBid: 2 milestone POSTs");

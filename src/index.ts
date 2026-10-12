@@ -1,525 +1,31 @@
-import type { Env, Order, ScoreResult, UpgradeId } from "./types";
-import { getConfig, type Config } from "./config";
-import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts } from "./enrich";
-import { filterNew, markAlertSeen, seenStats24h } from "./service";
-import { fetchActiveOrders, type ActiveOrdersResult } from "./sources/freelancer-active";
+import type { Env, Order, UpgradeId } from "./types";
+import { getConfig } from "./config";
+import { fetchPortfolio } from "./enrich";
+import { seenStats24h } from "./service";
+import { fetchActiveOrders } from "./sources/freelancer-active";
 import { fetchSearchOrders } from "./sources/freelancer-search";
-import { log, logImportant, logError, heartbeat, readRing, flushLogBuffer } from "./logger";
+import { getChannels, type ChannelId } from "./channels";
+import { fetchProfileMap } from "./profiles";
+import { log, readRing } from "./logger";
 import {
   scoreOrder,
   buildBidMessages,
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, formatPassCard, formatRejectCard, sendTelegram, alert, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage, type ManualActions } from "./telegram";
-import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft } from "./upgrades";
-import { placeBid } from "./bidder";
-import { getMode, setMode, type Mode } from "./mode";
-import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule, applyScheduleDelta, type Schedule } from "./schedule";
+import { formatOrderCard, formatPassCard, sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
+import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";
+import { getMode, setMode } from "./mode";
+import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule, applyScheduleDelta, type Schedule } from "./schedule";
+import { clampWeeklyLimit, channelRunnerStub, ordersBankStub, bidBudgetStub } from "./durable";
 
-// Компаратор сортировки заказов к скорингу: при дефиците bids свежие заказы
-// релевантнее — размещение идёт по этому порядку, LLM-квота тратится на всех.
-export function bySubmitTsDesc(a: Order, b: Order): number {
-  return b.submit_ts - a.submit_ts;
-}
-
-interface TickStats {
-  mode: Mode;
-  alertsFetched: number;
-  alertsFresh: number;
-  scored: number;
-  llmPass: number;
-  bidCards: number;
-  errors: string[];
-}
-
-const BIDS_UNSET_ALERT_KEY = "bids:unset-alerted";
-
-async function sendAuthAlertOnce(env: Env, key: string, ttlSec: number, message: string): Promise<void> {
-  const already = await env.ORDERS_KV.get(key);
-  if (already !== null) return;
-  await env.ORDERS_KV.put(key, String(Date.now()), { expirationTtl: ttlSec });
-  await alert(env, message);
-}
-
-// Потолок weekly limit для hourly: LLM может только снизить лимит.
-function clampWeeklyLimit(score: ScoreResult, cfg: Config): void {
-  if (score.weekly_limit_hours === null) return;
-  const cap = Math.min(cfg.weeklyLimitHours, 40);
-  score.weekly_limit_hours = Math.min(score.weekly_limit_hours, cap);
-}
-
-export async function runTick(env: Env, trigger: "cron" | "manual" = "cron"): Promise<TickStats> {
-  const mode = await getMode(env);
-  const stats: TickStats = {
-    mode,
-    alertsFetched: 0,
-    alertsFresh: 0,
-    scored: 0,
-    llmPass: 0,
-    bidCards: 0,
-    errors: [],
-  };
-
-  // Режим off — ничего не делаем вообще.
-  if (mode === "off") {
-    log("tick.off", { trigger });
-    await flushLogBuffer(env);
-    return stats;
-  }
-
-  const cfg = getConfig(env);
-  const startedAt = Date.now();
-  log("tick.start", { trigger, mode });
-
-  // Детект назначения ставок и опрос статусов этапных запросов — независимо
-  // от свежих заказов и bids-баланса. Ошибка не должна ломать тик.
-  try {
-    const ms = await checkMilestones(env);
-    if (ms.awarded.length > 0 || ms.requested.some((r) => !r.error)) {
-      log("milestones.checked", {
-        awarded: ms.awarded.length,
-        requested: ms.requested.filter((r) => !r.error).length,
-        skipped: ms.skipped.map((s) => s.reason),
-      });
-    }
-  } catch (e) {
-    console.error("milestones failed:", e);
-    await logError(env, "milestones.error", { message: String(e).slice(0, 300) });
-  }
-
-  // Гейт bids-баланса — ДО опроса заказов: при balance = 0 система в idle
-  // (нет ни опроса API, ни LLM) до восстановления хотя бы одного bid.
-  // Заказы за время простоя не теряются окончательно: курсор не двигается,
-  // при возобновлении докрутимся по свежему окну выдачи.
-  let bidsBalance: number | null = null;
-  try {
-    const b = await getBidsBalance(env);
-    bidsBalance = b.balance;
-  } catch (e) {
-    console.warn("getBidsBalance failed:", String(e));
-  }
-
-  if (bidsBalance === 0) {
-    log("tick.idle-no-bids", {});
-    if (mode === "test") {
-      await alert(env, "bids = 0 — idle: опрос и LLM остановлены до восстановления bid");
-    }
-    await finishTick(env, stats, startedAt);
-    await flushLogBuffer(env);
-    return stats;
-  }
-
-  if (bidsBalance === null) {
-    // Баланс не прочитался (API getBidLimit недоступен и леджер пуст) —
-    // работаем без поднятия планки, но алертим (не чаще раза в сутки).
-    await sendAuthAlertOnce(
-      env,
-      BIDS_UNSET_ALERT_KEY,
-      86400,
-      "Баланс bids не читается (getBidLimit недоступен)",
-    );
-  }
-
-  // График работы откликов: вне окна (по Минску) опрос заказов и LLM
-  // пропускаем. Этапы выше уже проверены — они идут всегда, в любое время.
-  const sched = await getSchedule(env);
-  if (!isWithinSchedule(sched, Date.now())) {
-    log("tick.skipped-schedule", {});
-    await finishTick(env, stats, startedAt);
-    await flushLogBuffer(env);
-    return stats;
-  }
-
-  const ordersToScore: Order[] = [];
-
-  // --- Два канала intake: закрытая веб-лента (freelancer-auth-v2) и публичный
-  // поиск projects/active (без авторизации). Ошибка одного канала логируется
-  // с пометкой канала и не блокирует другой. Заказы каналов склеиваются по id:
-  // заказ, пришедший из обоих каналов за один тик, скорится один раз
-  // (внутритиковый дедуп; между тиками дедупликацию даёт D1 seen).
-  const merged = new Map<number, Order>();
-  let feedOrders = 0;
-  let searchOrders = 0;
-
-  const absorb = async (result: ActiveOrdersResult, channel: "feed" | "search"): Promise<void> => {
-    if (result.error !== null) {
-      stats.errors.push(result.error);
-      await logError(env, "active.error", { channel, message: result.error });
-      if (channel === "feed" && result.error.includes("UNAUTHORIZED")) {
-        await sendAuthAlertOnce(
-          env,
-          "feed:unauth-alerted",
-          3600,
-          "Веб-авторизация Freelancer протухла (401) — обнови через /admin/fl-auth",
-        );
-      }
-      return;
-    }
-    if (result.skipped) return;
-    if (channel === "feed") feedOrders = result.orders.length;
-    else searchOrders = result.orders.length;
-    for (const order of result.orders) {
-      if (!merged.has(order.id)) merged.set(order.id, order);
-    }
-  };
-
-  try {
-    await absorb(await fetchActiveOrders(env), "feed");
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    stats.errors.push(message);
-    await logError(env, "active.error", { channel: "feed", message });
-  }
-  try {
-    await absorb(await fetchSearchOrders(env), "search");
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    stats.errors.push(message);
-    await logError(env, "active.error", { channel: "search", message });
-  }
-
-  if (feedOrders > 0 || searchOrders > 0) {
-    stats.alertsFetched = feedOrders + searchOrders;
-    log("active.fetched", { count: merged.size });
-    console.log(
-      JSON.stringify({ step: "active.merged", feed: feedOrders, search: searchOrders, orders: merged.size }),
-    );
-    const fresh = await filterNew(env, [...merged.values()]);
-
-      // Enrich ДО гейта: мягкий пре-гейт (recruiter/KYC/крипто-скилл) решается
-      // по данным заказчика из users/0.1/users (owner_id из элемента ленты) —
-      // туда же уходит order.client в скоринг.
-      for (const order of fresh) {
-        try {
-          order.client = await fetchProjectClient(env, order.owner_id ?? null);
-        } catch (e) {
-          order.client = null;
-          console.warn("fetchProjectClient failed:", { id: order.id, err: String(e) });
-        }
-      }
-
-      // Гейт до LLM: физическая возможность ставки + жёсткие гейты фазы 0
-      // (конкуренция и бюджет — см. preBidRejectReason).
-      const { kept, rejected } = await markAlertSeen(env, fresh, "active");
-      stats.alertsFresh = kept.length;
-      log("active.fresh", { fresh: kept.length, rejected: rejected.length });
-      ordersToScore.push(...kept);
-
-      // Test-режим: уведомляем и об отклонённых гейтом с конкретной причиной.
-      if (mode === "test") {
-        for (const { order, reason } of rejected) {
-          const human =
-            reason === "rej:recruiter"
-              ? "recruiter-проект — только для Preferred Freelancer"
-              : reason === "rej:kyc-required"
-                ? "заказ требует KYC-верификации аккаунта"
-                : reason === "rej:crypto-verified"
-                  ? "крипто-проект — нужна верификация Freelancer"
-                  : reason === "rej:hot-competition"
-                    ? `больше ${cfg.phaseMaxBids} откликов уже при появлении — конкуренция бешеная и растёт, шанс попасть в топ выдачи низкий`
-                    : reason === "rej:budget-fixed"
-                      ? `бюджет выше потолка фазы 0 ($${cfg.phaseBudgetFixedUsd})`
-                      : reason === "rej:budget-hourly"
-                        ? `ставка выше потолка фазы 0 ($${cfg.phaseBudgetHourlyUsd}/ч)`
-                        : reason;
-          await sendTelegram(env, `[TEST] гейт ${reason}\n\n${formatRejectCard(order, human)}`);
-        }
-      }
-  }
-
-  if (ordersToScore.length === 0) {
-    await finishTick(env, stats, startedAt);
-    await flushLogBuffer(env);
-    return stats;
-  }
-
-  // Сортировка — см. bySubmitTsDesc.
-  ordersToScore.sort(bySubmitTsDesc);
-
-  // Артефакты заказа (вложения + страницы по ссылкам из описания) — только для
-  // заказов, дошедших до LLM: уходят в JSON скоринга и в контекст текста ставки.
-  for (const order of ordersToScore) {
-    try {
-      order.artifacts = await fetchOrderArtifacts(env, order);
-    } catch (e) {
-      order.artifacts = null;
-      console.warn("fetchOrderArtifacts failed:", { id: order.id, err: String(e) });
-    }
-  }
-
-  // Параллельная обработка: каждый заказ — свой "поток" (async-задача) с полным
-  // циклом score → bidText → placeBid → карточка. Пул лимитирует одновременные
-  // LLM-вызовы (LLM_CONCURRENCY), чтобы не провоцировать Kimi 429; переполнение
-  // смягчают ретраи в chatWithRetries (5с/15с).
-  const bidCtx: { reserved: number } = { reserved: 0 };
-
-  const results = await runWithConcurrency(ordersToScore, LLM_CONCURRENCY, async (order) => {
-    const outcome = await processOrder(env, order, cfg, mode, bidsBalance, bidCtx);
-    if (outcome === "pass") stats.llmPass += 1;
-    else if (outcome === "bid") stats.bidCards += 1;
-  });
-  void results;
-
-  stats.scored = stats.llmPass + stats.bidCards;
-  await finishTick(env, stats, startedAt);
-  await flushLogBuffer(env);
-  return stats;
-}
-
-type OrderOutcome = "bid" | "pass" | "error";
-
-interface BidReservation {
-  reserved: number;
-}
-
-// Свежие ставки заказа: GET /bids/?projects[]={id} с той же логикой авторизации,
-// что в placeBid (OAuth либо Bearer). Слот sponsored свободен, если ни у одной
-// ставки нет sponsored=true. bids приходит списком или словарём (оба разбираем,
-// по образцу milestones.ts fetchMyBids). Ошибка/не-ok → null ("не проверен").
-async function fetchSponsoredSlotFree(
-  env: Env,
-  cfg: Config,
-  order: Order,
-): Promise<boolean | null> {
-  const authHeaders: Record<string, string> | null = cfg.flOauthToken
-    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
-    : cfg.flApiKey
-      ? { Authorization: `Bearer ${cfg.flApiKey}` }
-      : null;
-  if (!authHeaders) return null;
-  try {
-    const res = await fetch(`${cfg.freelancerBase}/bids/?projects[]=${order.id}`, {
-      headers: authHeaders,
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { status?: string; result?: { bids?: unknown } };
-    if (data.status !== "success") return null;
-    const bids = data.result?.bids;
-    const list: { sponsored?: boolean }[] = Array.isArray(bids)
-      ? (bids as { sponsored?: boolean }[])
-      : bids && typeof bids === "object"
-        ? (Object.values(bids) as { sponsored?: boolean }[])
-        : [];
-    return !list.some((b) => b && b.sponsored === true);
-  } catch (e) {
-    console.warn("fetchSponsoredSlotFree failed:", { id: order.id, err: String(e) });
-    return null;
-  }
-}
-
-async function processOrder(
-  env: Env,
-  order: Order,
-  cfg: Config,
-  mode: Mode,
-  bidsBalance: number | null,
-  bidCtx: BidReservation,
-): Promise<OrderOutcome> {
-  try {
-    const score = await scoreOrder(env, order);
-
-    if (score === null) {
-      await logError(env, "order.error", { id: order.id, err: "scoring-parse-failed" });
-      return "error";
-    }
-
-    clampWeeklyLimit(score, cfg);
-
-    await logImportant(env, "llm.verdict", {
-      id: order.id,
-      verdict: score.verdict,
-      reason: score.reason,
-      bid_amount: score.bid_amount,
-      net_amount: score.net_amount,
-      value_score: score.value_score,
-    });
-
-    if (score.verdict === "PASS") {
-      // Test-режим: PASS тоже уведомляем — для анализа качества скоринга.
-      if (mode === "test") {
-        await sendTelegram(env, `[TEST] PASS\n\n${formatPassCard(order, score)}`);
-      }
-      return "pass";
-    }
-
-    // Общий bids-баланс: защита от перерасхода внутри батча.
-    // bidsBalance — снимок до пула; reserved — BID'ы этого тика.
-    if (bidsBalance !== null && bidsBalance - bidCtx.reserved <= 0) {
-      bidCtx.reserved += 1;
-      await sendTelegram(env, `⚠️ Отклик НЕ отправлен: bids exhausted in tick\n\n${formatOrderCard(order, score, null)}`);
-      await logImportant(env, "order.notified", {
-        id: order.id,
-        title: order.title.slice(0, 80),
-        placed: false,
-        reason: "bids-exhausted-in-tick",
-      });
-      return "bid";
-    }
-    bidCtx.reserved += 1;
-
-    // Статус слота sponsored: один запрос bids на заказ — переиспользуется
-    // и фильтром плана ниже, и блоком ручных действий в карточке. Ошибка /
-    // не-ok → null ("не проверен"): слот как фактор не учитываем, но и не
-    // блокируем из-за него отклик.
-    const slotFree = await fetchSponsoredSlotFree(env, cfg, order);
-
-    // Философия sponsored (rules): код довыкидывает sponsored из плана LLM
-    // по жёстким фактам, которые модель видит хуже/позже. Неопределённость
-    // слота (null) — НЕ повод выкидывать: цена допа ограничена потолком 15%.
-    let sponsoredRemovedNote: string | undefined;
-    if (score.take_upgrades.includes("sponsored")) {
-      let reason: string | null = null;
-      if (order.bids <= 15) {
-        reason = "bids <= 15 (sponsored не нужен)";
-      } else if (slotFree === false) {
-        reason = "слот занят";
-      } else {
-        const left = await sponsoredDailyLeft(env);
-        if (left <= 0) reason = "лимит дня: 3 sponsored/сутки";
-      }
-      if (reason !== null) {
-        score.take_upgrades = score.take_upgrades.filter((u) => u !== "sponsored");
-        sponsoredRemovedNote = reason;
-      }
-    }
-
-    const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-    if (cap.removed.length > 0) {
-      score.take_upgrades = cap.kept;
-    }
-
-    let bidText: string | null = null;
-    try {
-      const portfolio = await fetchPortfolio(env).catch((e) => {
-        console.warn("fetchPortfolio failed:", String(e));
-        return null;
-      });
-      bidText = await generateBidText(env, order, buildBidMessages(order, score, portfolio));
-    } catch (e) {
-      console.error("generateBidText failed:", e);
-    }
-
-    // Текст ставки не получен (LLM недоступен/молчит) — ставку не размещаем:
-    // bids не тратим, карточка предупреждает, сбой виден в кольцевом логе.
-    if (bidText === null) {
-      await logError(env, "order.error", { id: order.id, err: "bid-text-failed" });
-      await sendTelegram(
-        env,
-        `⚠️ Отклик НЕ отправлен: текст ставки не получен (LLM недоступен) — заказ пропущен, bids не потрачены\n\n${formatOrderCard(order, score, null)}`,
-      );
-      await logImportant(env, "order.notified", {
-        id: order.id,
-        title: order.title.slice(0, 80),
-        placed: false,
-        reason: "bid-text-failed",
-      });
-      return "bid";
-    }
-
-    const bidResult = await placeBid(env, order, score, bidText);
-
-    // Консоль действий в карточке: sealed покупает код автоматически (корзина),
-    // ручных действий по нему нет; ссылка на ставку — только если она реально
-    // размещена (в test-режиме bidId=null).
-    const manualActions: ManualActions | null =
-      score.take_upgrades.length > 0 || score.verdict === "BID"
-        ? {
-            bidId: bidResult.placed ? (bidResult.bidId ?? null) : null,
-            slotFree,
-            sponsoredPrice: priceUpgrades(["sponsored"], score.bid_amount)[0].label,
-            sponsoredRemovedNote,
-            test: mode === "test",
-          }
-        : null;
-
-    const card = formatOrderCard(order, score, bidText, manualActions);
-    const sign = order.currency_sign ?? "$";
-    let header: string;
-    if (mode === "test") {
-      header = `[TEST] ставка НЕ отправлена`;
-    } else if (bidResult.placed) {
-      const upgradesPart =
-        score.take_upgrades.includes("sponsored") ? "sponsored" : "без апгрейдов";
-      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, план апгрейдов: ${upgradesPart}`;
-      if (bidResult.sealPurchase === "no-web-auth") {
-        header += `\n⚠️ sealed не куплен: нет веб-авторизации`;
-      } else if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
-        header += `\n⚠️ sealed НЕ куплен (покупка через корзину отклонена: ${bidResult.sealPurchase}) — купи вручную на сайте, если нужно`;
-      }
-    } else if (bidResult.reason?.startsWith("insufficient-balance")) {
-      header = `⚠️ Отклик НЕ отправлен: заказ требует минимальный баланс на счету (~$20) — пополни счёт и откликни вручную`;
-      if (bidResult.reason.length > "insufficient-balance".length) {
-        header += `\nПричина API: ${bidResult.reason}`;
-      }
-      await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
-    } else if (bidResult.reason === "verification-required") {
-      header = `⚠️ Отклик НЕ отправлен: заказ закрыт для нашего аккаунта — платформа требует верификацию Freelancer (категория Cryptocurrency) либо статус Preferred Freelancer`;
-    } else if (bidResult.reason === "preferred-only") {
-      header = `⚠️ Отклик НЕ отправлен: заказ только для Preferred Freelancer (recruiter-проект) — наш аккаунт не подходит`;
-    } else {
-      header = `⚠️ Отклик НЕ отправлен: ${bidResult.reason ?? "unknown"}`;
-    }
-    await sendTelegram(env, `${header}\n\n${card}`);
-    await logImportant(env, "order.notified", {
-      id: order.id,
-      title: order.title.slice(0, 80),
-      bid: score.bid_amount,
-      net: score.net_amount,
-      placed: bidResult.placed,
-    });
-    return "bid";
-  } catch (e) {
-    // 429 и прочие — падает только этот заказ, остальные в пуле продолжают.
-    console.error(`order ${order.id} processing failed:`, e);
-    await logError(env, "order.error", {
-      id: order.id,
-      err: e instanceof KimiError && e.status === 429 ? "kimi-429" : String(e).slice(0, 200),
-    });
-    return "error";
-  }
-}
-
-// Пул одновременных LLM-вызовов на тик: при всплеске заказов батч обрабатывается
-// параллельно, но не выше этого потолка (Kimi 429). Тик при этом не перекрывается
-// со следующим: DO однопоточный, длинный батч просто отодвигает следующий тик.
-const LLM_CONCURRENCY = 5;
-
-export async function runWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next;
-      next += 1;
-      results[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
-async function finishTick(env: Env, stats: TickStats, startedAt: number): Promise<void> {
-  const durationMs = Date.now() - startedAt;
-  log("tick.done", { stats, durationMs });
-  if (stats.alertsFresh > 0 || stats.bidCards > 0 || stats.errors.length > 0) {
-    await logImportant(env, "tick.done-nonquiet", {
-      alertsFresh: stats.alertsFresh,
-      bidCards: stats.bidCards,
-      errors: stats.errors.length,
-      durationMs,
-    });
-  } else {
-    await heartbeat(env, { durationMs });
-  }
-}
+// Durable Objects новой архитектуры каналов (реализация — в durable.ts;
+// class_name в wrangler.toml ссылается на эти реэкспорты entrypoint).
+export { ChannelRunner, OrdersBank, BidBudget, runOrderPipeline } from "./durable";
+// Реэкспорт ради приёмки (scripts/acceptance.ts импортирует из index).
+export { runWithConcurrency, bySubmitTsDesc } from "./util";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
@@ -560,7 +66,7 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ error: "invalid JSON body" }, 400);
     }
   } else {
-    // Fallback: берём самый свежий заказ из официального active-канала.
+    // Fallback: берём самый свежий заказ из общего feed-канала.
     const active = await fetchActiveOrders(env);
     if (active.orders.length > 0) {
       order = active.orders[0];
@@ -869,38 +375,12 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
   return new Response("Not Found", { status: 404 });
 }
 
-// Durable Object — быстрый цикл тиков: cron в Workers не умеет чаще минуты,
-// поэтому runTick крутится на alarm-цепочке каждые TICK_INTERVAL_MS.
-// DO однопоточный: тики не перекрываются, следующий аларм ставится
-// по завершении предыдущего. Cron (1/мин) — сторож: будит DO, если цепочка
-// прервалась (деплой, ошибка инфраструктуры).
-const TICK_INTERVAL_MS = 10_000;
-
-export class TickScheduler {
-  constructor(
-    private readonly state: DurableObjectState,
-    private readonly env: Env,
-  ) {}
-
-  async fetch(): Promise<Response> {
-    // Сторож: ставим аларм только если его нет (не перезапускаем цепочку).
-    const existing = await this.state.storage.getAlarm();
-    if (existing === null) {
-      await this.state.storage.setAlarm(Date.now());
-    }
-    return new Response("ok");
-  }
-
-  async alarm(): Promise<void> {
-    try {
-      await runTick(this.env);
-    } catch (e) {
-      console.error("tick failed", e);
-    } finally {
-      // Цепочка не должна прерваться даже при исключении.
-      await this.state.storage.setAlarm(Date.now() + TICK_INTERVAL_MS);
-    }
-  }
+// Идентификаторы каналов, для которых живёт ChannelRunner (общий feed +
+// включённые поисковые каналы).
+function activeChannelIds(env: Env): ChannelId[] {
+  return getChannels(env)
+    .filter((c) => c.enabled)
+    .map((c) => c.id);
 }
 
 export default {
@@ -924,8 +404,20 @@ export default {
         return await handleTestScore(request, env);
       }
       if (request.method === "POST" && url.pathname === "/test/tick") {
-        const stats = await runTick(env, "manual");
-        return jsonResponse(stats);
+        // Ручное будение каналов: каждый runner получит ближайший alarm.
+        const ids = activeChannelIds(env);
+        await Promise.all(ids.map((id) => channelRunnerStub(env, id).ensureAlarm()));
+        return jsonResponse({ ok: true, channels: ids });
+      }
+      if (request.method === "GET" && url.pathname === "/test/channels") {
+        const ids = activeChannelIds(env);
+        const statuses = await Promise.all(
+          ids.map((id) => channelRunnerStub(env, id).status()),
+        );
+        return jsonResponse({ channels: statuses });
+      }
+      if (request.method === "GET" && url.pathname === "/test/profiles") {
+        return jsonResponse({ profiles: await fetchProfileMap(env) });
       }
       if (request.method === "POST" && url.pathname === "/test/set-webhook") {
         return await handleSetWebhook(request, env);
@@ -965,9 +457,14 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 
+  // Watchdog (1/мин): будим alarm-цепочки всех активных каналов, банка seen
+  // и бюджета ставок — если цепочка жива, вызовы no-op.
   scheduled(event, env, ctx): void {
-    // Watchdog: будим DO (если alarm-цепочка жива — no-op).
-    const stub = env.TICK_SCHEDULER.get(env.TICK_SCHEDULER.idFromName("main"));
-    ctx.waitUntil(stub.fetch("https://do.internal/wake").catch((e) => console.error("do wake failed", e)));
+    for (const id of activeChannelIds(env)) {
+      const stub = channelRunnerStub(env, id);
+      ctx.waitUntil(stub.ensureAlarm().catch((e) => console.error(`do wake failed: ${id}`, e)));
+    }
+    ctx.waitUntil(ordersBankStub(env).wake().catch((e) => console.error("bank wake failed", e)));
+    ctx.waitUntil(bidBudgetStub(env).wake().catch((e) => console.error("budget wake failed", e)));
   },
 } satisfies ExportedHandler<Env>;

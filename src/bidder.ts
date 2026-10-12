@@ -4,6 +4,9 @@ import { recordBidSpent } from "./bids-balance";
 import { getMode } from "./mode";
 import { resolveWebAuth, webAuthHeaders, type WebAuth } from "./web-auth";
 import { buySealedUpgrade } from "./payments";
+import { profileChannel } from "./channels";
+import { resolveProfileId } from "./profiles";
+import { sendTelegram } from "./telegram";
 
 export interface BidResult {
   placed: boolean;
@@ -22,8 +25,9 @@ export function buildBidBody(
   bidderId: number,
   bidText: string,
   score: ScoreResult,
+  profileId: number | null,
 ): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     project_id: orderId,
     bidder_id: bidderId,
     description: bidText,
@@ -35,6 +39,26 @@ export function buildBidBody(
       score.milestones !== null && score.milestones.length >= 2 ? 50 : 100,
     showcases: [],
   };
+  // Фронт шлёт profile_id всегда, когда профилей больше одного.
+  if (profileId !== null) body.profile_id = profileId;
+  return body;
+}
+
+// Одноразовый алерт в Telegram (флаг в KV на 1 ч): профиль канала не
+// разрешился в числовой id.
+async function alertProfileUnresolved(env: Env, profileName: string, isDefault: boolean): Promise<void> {
+  const key = "tg:alert:profile-unresolved";
+  const existing = await env.ORDERS_KV.get(key);
+  if (existing) return;
+  const text = isDefault
+    ? `⚠️ Профиль «${profileName}» не разрешился через API — ставка пойдёт без profile_id (подсказка реестра тоже пуста)`
+    : `⛔ Профиль «${profileName}» не разрешился через API и в реестре нет подсказки — ставка отменена`;
+  try {
+    await sendTelegram(env, text);
+    await env.ORDERS_KV.put(key, "1", { expirationTtl: 3600 });
+  } catch (err) {
+    console.warn("alert profile-unresolved failed:", err);
+  }
 }
 
 // Разместить ставку. Основной путь — веб-авторизация freelancer-auth-v2
@@ -102,7 +126,17 @@ export async function placeBid(
     ? webAuthHeaders(webAuth)
     : (fallbackHeaders as Record<string, string>);
   const bidderId = Number(webAuth?.userId ?? cfg.flUserId);
-  const body = buildBidBody(order.id, bidderId, bidText, score);
+  // Профиль канала отклика → числовой id профиля Freelancer (null — без поля).
+  const channel = profileChannel(score.profile);
+  const profileId = await resolveProfileId(env, channel.profileName);
+  if (profileId === null && channel.profileName !== null) {
+    await alertProfileUnresolved(env, channel.profileName, channel.isDefault);
+    if (channel.isDefault === false) {
+      console.error("bidder.profile-unresolved", { id: order.id, profile: channel.profileName });
+      return { placed: false, reason: "profile-unresolved" };
+    }
+  }
+  const body = buildBidBody(order.id, bidderId, bidText, score, profileId);
 
   const res = await fetch(
     `${cfg.freelancerBase}/bids/?compact=true&new_errors=true&new_pools=true`,
