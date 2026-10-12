@@ -260,13 +260,9 @@ export class ChannelRunner extends DurableObject<Env> {
     const state: ChannelState = {
       get: async (key) => {
         const v = await this.ctx.storage.get(key);
-        const s = v === undefined || v === null ? null : String(v);
-        // Диагностика курсоров (времянка): почему feed перечитывает выдачу.
-        if (key.includes("last_submit")) console.log(`[state] get ${key} -> ${s}`);
-        return s;
+        return v === undefined || v === null ? null : String(v);
       },
       put: async (key, value, ttlSec) => {
-        if (key.includes("last_submit")) console.log(`[state] put ${key} = ${value}`);
         // expirationTtl поддерживается рантаймом DO, но не типами
         // @cloudflare/workers-types этой версии — каст.
         await this.ctx.storage.put(
