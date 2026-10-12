@@ -260,9 +260,13 @@ export class ChannelRunner extends DurableObject<Env> {
     const state: ChannelState = {
       get: async (key) => {
         const v = await this.ctx.storage.get(key);
-        return v === undefined || v === null ? null : String(v);
+        const s = v === undefined || v === null ? null : String(v);
+        // Диагностика курсоров (времянка): почему feed перечитывает выдачу.
+        if (key.includes("last_submit")) console.log(`[state] get ${key} -> ${s}`);
+        return s;
       },
       put: async (key, value, ttlSec) => {
+        if (key.includes("last_submit")) console.log(`[state] put ${key} = ${value}`);
         // expirationTtl поддерживается рантаймом DO, но не типами
         // @cloudflare/workers-types этой версии — каст.
         await this.ctx.storage.put(
@@ -513,7 +517,10 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
 
   // 1. Арбитр свежести: банк — единственный владелец seen.
   const freshness = await bank.checkAndMark(order.id, source, Date.now());
-  if (freshness === "duplicate") return;
+  if (freshness === "duplicate") {
+    console.log(`pipeline.duplicate ${order.id} (${source})`);
+    return;
+  }
 
   // 2/3. Enrich до гейта: мягкий пре-гейт (recruiter/KYC/крипто-скилл) решается
   // по данным заказчика из users/0.1/users — туда же уходит order.client в скоринг.
