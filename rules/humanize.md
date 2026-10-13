@@ -95,10 +95,10 @@ Return only the rewritten text.
 - В последнем абзаце с объяснением низкой цены добавь 1-2 ASCII-эмотикона только из символов базовой клавиатуры (например «:)», «;)»). Цель — немного теплоты и человечности к концу письма. Не добавляй эмотиконы в других частях отклика, не используй техничные смайлы.
 - Названия проектов портфолио — всегда в двойных ASCII-кавычках ("...").
 - КРЮЧОК В ПЕРВЫХ ДВУХ ПРЕДЛОЖЕНИЯХ — СВЯЩЕНЕН. Не ослабляй его, не переписывай в пересказ заказа, не переноси в середину текста. Если черновик открывается пересказом заказа или перечислением его требований и технологий — перепиши начало: первая фраза должна быть про проблему, последствие или выгоду клиента, а не про состав работ.
-- Прямая фраза "I'm an experienced developer" (и «я опытный разработчик») ЗАПРЕЩЕНА. Объяснение низкой цены строй ОДНИМ из вариантов ниже (с адаптацией суммы и деталей под заказ):
+- Прямая фраза "I'm an experienced developer" (и «я опытный разработчик») ЗАПРЕЩЕНА. Объяснение низкой цены строй ОДНИМ из вариантов ниже (адаптируй детали под заказ, сумму ставки не называй — ни цифрой, ни словами, она видна в шапке предложения):
   * "I've been building websites for a while ..."
   * "I've got solid experience building websites ..."
   * "My background is in building and shipping responsive websites ..."
   * "I already have solid web development experience ..."
   * "I've been doing this for a while ..."
-  * "This platform is new to me, so I'm pricing my first project here at $X to earn that first review."
+  * "This platform is new to me, so I'm pricing my first project here low to earn that first review."
