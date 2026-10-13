@@ -19,7 +19,8 @@ import {
 // внутри длинного тика и от частоты выше разумной для платформы.
 // Новые элементы ленты — компактные; полные карточки догружаются из
 // projects/0.1/projects (mapCardToProject) и нормализуются через normalizeProject.
-const SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
+import { MAIN_SKILLS } from "../channels";
+
 const FETCH_TIMEOUT_MS = 15000;
 const POLL_MIN_INTERVAL_MS = 5_000;
 const CURSOR_KEY = "active:last_submit";
@@ -194,7 +195,7 @@ export async function fetchActiveOrders(env: Env, state: ChannelState = kvChanne
 
   // Веб-эндпоинт живёт вне базы REST: полный URL, не от freelancerBase.
   const url = new URL("https://www.freelancer.com/ajax-api/navigation/project-feed/pre-populated.php");
-  for (const id of SKILLS) url.searchParams.append("jobIds[]", String(id));
+  for (const id of MAIN_SKILLS) url.searchParams.append("jobIds[]", String(id));
   url.searchParams.set("fromWebapp", "true");
   url.searchParams.set("compact", "true");
   url.searchParams.set("new_errors", "true");

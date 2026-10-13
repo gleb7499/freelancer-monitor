@@ -3,24 +3,23 @@ import type { Env, UpgradeId } from "./types";
 export interface UpgradePrice {
   id: UpgradeId;
   label: string;
-  approx: boolean;
 }
 
 const PRICES: Record<
   UpgradeId,
-  (bidAmount: number) => { label: string; approx: boolean }
+  (bidAmount: number) => { label: string }
 > = {
   // Sealed: $0.10 стабильно (наблюдение Gleb'а). Покупка через API сейчас
   // требует PFP (USER_NOT_IN_PFP, проверено 05.10.2026) — веб-форма при этом
   // предлагает $0.10; покупка API-автоматом не гарантирована.
-  sealed: () => ({ label: "sealed $0.10", approx: false }),
+  sealed: () => ({ label: "sealed $0.10" }),
   // Sponsored: цена динамическая per project (скриншоты: $1.90 на ₹7000 и $2.90
   // на $500). Оценка 0.75% — только ориентир; реальная цена известна форме ставки.
   sponsored: (bid) => {
     const raw = bid * 0.0075;
     const clamped = Math.min(19.99, Math.max(1.9, raw));
     const price = Math.round(clamped * 100) / 100;
-    return { label: `sponsored ~$${price.toFixed(2)}`, approx: true };
+    return { label: `sponsored ~$${price.toFixed(2)}` };
   },
 };
 

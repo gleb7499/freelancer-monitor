@@ -11,7 +11,6 @@ const RING_STEPS = new Set([
   "llm.verdict",
   "order.notified",
   "order.error",
-  "tick.done-nonquiet",
   "heartbeat",
 ]);
 

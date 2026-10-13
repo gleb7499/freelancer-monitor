@@ -79,8 +79,8 @@ export interface ScoreResult {
 
 export type UpgradeId = "sealed" | "sponsored";
 
-// Информация о заказчике (enrich.fetchProjectClient). Источник — открытый
-// эндпоинт projects/0.1/projects/seo (проверено live 2026-10-04): verification,
+// Информация о заказчике (enrich.fetchProjectClient). Источник — закрытый
+// эндпоинт users/0.1/users (freelancer-auth-v2): verification,
 // рейтинг работодателя, registration_unixtime, other_employer_jobs.
 export interface ProjectClientInfo {
   payment_verified: boolean | null;

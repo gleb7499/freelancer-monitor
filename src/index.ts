@@ -13,7 +13,7 @@ import {
   generateBidText,
   KimiError,
 } from "./kimi";
-import { formatOrderCard, formatPassCard, sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
+import { sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";

@@ -19,6 +19,7 @@ import {
   type ScoringContext,
 } from "./prompts";
 import { getBidsBalance } from "./bids-balance";
+import { orderRate } from "./telegram";
 import { sponsoredDailyLeft } from "./upgrades";
 import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
 import type { ProfileId } from "./channels";
@@ -39,7 +40,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function chat(
+async function chat(
   env: Env,
   messages: { role: string; content: string }[],
   opts?: { jsonSchema?: object }
@@ -100,13 +101,6 @@ function extractJson(text: string): unknown {
 const FALLBACK_MILESTONE_FIRST = "Project setup and kickoff";
 const FALLBACK_MILESTONE_MIDDLE = ["Core implementation", "Integration and testing"];
 const FALLBACK_MILESTONE_LAST = "Final delivery and handover";
-
-// Курс родной валюты заказа за 1 USD — восстанавливается из бюджета.
-function orderRate(order: Order): number {
-  return order.budget_min > 0 && order.budget_min_original > 0
-    ? order.budget_min_original / order.budget_min
-    : 1;
-}
 
 // Шаг круглой сетки ставки по величине суммы.
 function gridStep(amount: number): number {

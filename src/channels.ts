@@ -28,7 +28,7 @@ export interface Channel {
   isDefault: boolean;
 }
 
-const MAIN_SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
+export const MAIN_SKILLS = [9, 323, 607, 741, 759, 979, 1002, 1042, 2370, 2376, 2703];
 
 // Статический реестр (enabled для android здесь false — включение решает env
 // в getChannels; см. buildScoringSystemPrompt, которому нужен актуальный список).

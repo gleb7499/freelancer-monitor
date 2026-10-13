@@ -47,7 +47,7 @@ function budgetLine(order: Order): string {
 }
 
 // Курс родной валюты за 1 USD — восстанавливается из бюджета заказа.
-function orderRate(order: Order): number {
+export function orderRate(order: Order): number {
   return order.budget_min > 0 && order.budget_min_original > 0
     ? order.budget_min_original / order.budget_min
     : 1;
