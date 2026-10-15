@@ -102,6 +102,10 @@ interface BidBudgetStub {
   release(reservation: string): Promise<void>;
   spend(reservation: string): Promise<void>;
   wake(): Promise<void>;
+  refresh(): Promise<void>;
+  noteBidFailed(): Promise<void>;
+  balanceContext(): Promise<{ balance: number | null; nextBidInMinutes: number | null }>;
+  debugState(): Promise<unknown>;
 }
 
 interface ChannelRunnerStub {
@@ -227,12 +231,14 @@ export class ChannelRunner extends DurableObject<Env> {
     // (нет ни опроса API, ни LLM) до восстановления хотя бы одного bid.
     // Заказы за время простоя не теряются окончательно: курсор не двигается,
     // при возобновлении докрутимся по свежему окну выдачи.
+    // Чтение — через BidBudget (RPC, без внешних запросов на каждый тик);
+    // сам баланс обновляется событиями, см. BidBudget.
     let bidsBalance: number | null = null;
     try {
-      const b = await getBidsBalance(env);
+      const b = await bidBudgetStub(env).balanceContext();
       bidsBalance = b.balance;
     } catch (e) {
-      console.warn("getBidsBalance failed:", String(e));
+      console.warn("balanceContext failed:", String(e));
     }
 
     if (bidsBalance === 0) {
@@ -381,23 +387,47 @@ export class OrdersBank extends DurableObject<Env> {
 }
 
 // ---------------------------------------------------------------------------
-// BidBudget: не дать потратить последний bid дважды. Резервирование до
-// фактического размещения; запись в bid_ledger — только в bidder.ts.
+// BidBudget: владелец баланса bids и резервирование (не дать потратить
+// последний bid дважды). Запись в bid_ledger — только в bidder.ts.
+//
+// Баланс — событийный, без опроса по таймеру (endpoint скрытый, палиться
+// нельзя). Обновления: spend (ставка размещена), noteBidFailed (реальный
+// отказ API), будильник регенерации (bidRefreshTime из ответа + 30 с),
+// сторожевой раз в час в окне графика. Читатели (гейт канала, скоринг,
+// /status) ходят через balanceContext — это дешёвый RPC без внешних вызовов.
 // ---------------------------------------------------------------------------
 
 const RESERVATION_TTL_MS = 30 * 60_000;
-const BALANCE_CACHE_MS = 60_000;
+// Сторожевой refresh: раз в час, только в окне графика работы.
+const WATCHDOG_MS = 60 * 60_000;
+// Запас к bidRefreshTime: серверу нужно время реально начислить bid.
+const REGEN_SKEW_MS = 30_000;
+// Повторы после сбоя fetch: 1 мин, 5 мин — дальше молчим до сторожевого.
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
 
 interface BudgetData {
   inFlight: number;
   reservations: Record<string, number>;
-  balanceCache: { value: number | null; ts: number };
+  // --- зона баланса ---
+  balance: number | null;
+  bidLimit: number | null;
+  unlimited: boolean;
+  nextRegenAt: number | null;
+  lastFetchAt: number;
+  retryCount: number;
+  retryAt: number | null;
 }
 
 const EMPTY_BUDGET: BudgetData = {
   inFlight: 0,
   reservations: {},
-  balanceCache: { value: null, ts: 0 },
+  balance: null,
+  bidLimit: null,
+  unlimited: false,
+  nextRegenAt: null,
+  lastFetchAt: 0,
+  retryCount: 0,
+  retryAt: null,
 };
 
 export class BidBudget extends DurableObject<Env> {
@@ -405,10 +435,11 @@ export class BidBudget extends DurableObject<Env> {
     super(ctx, env);
   }
 
-  // Сторож: запускает чистку протухших резервов, если цепочка не жива.
+  // Сторож (cron 1/мин): если alarm-цепочки нет (деплой, сбой) — поднимаем
+  // через refresh: он же заполнит баланс при холодном старте.
   async wake(): Promise<void> {
     if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + RESERVATION_TTL_MS);
+      await this.refresh();
     }
   }
 
@@ -418,7 +449,13 @@ export class BidBudget extends DurableObject<Env> {
     return {
       inFlight: raw.inFlight ?? 0,
       reservations: raw.reservations ?? {},
-      balanceCache: raw.balanceCache ?? { value: null, ts: 0 },
+      balance: raw.balance ?? null,
+      bidLimit: raw.bidLimit ?? null,
+      unlimited: raw.unlimited ?? false,
+      nextRegenAt: raw.nextRegenAt ?? null,
+      lastFetchAt: raw.lastFetchAt ?? 0,
+      retryCount: raw.retryCount ?? 0,
+      retryAt: raw.retryAt ?? null,
     };
   }
 
@@ -426,27 +463,100 @@ export class BidBudget extends DurableObject<Env> {
     await this.ctx.storage.put("data", data);
   }
 
-  private async balance(data: BudgetData): Promise<number | null> {
-    if (Date.now() - data.balanceCache.ts < BALANCE_CACHE_MS) {
-      return data.balanceCache.value;
-    }
-    let value: number | null = null;
+  // Ближайшее событие баланса: реген, повтор после сбоя, сторожевой,
+  // чистка резервов. Сторожевой «просроченный» (ночь вне графика, lastFetchAt=0)
+  // переносим на +час от сейчас, чтобы не крутить будильник впустую.
+  private nextAlarmAt(data: BudgetData, now: number): number {
+    const candidates: number[] = [now + RESERVATION_TTL_MS, now + WATCHDOG_MS];
+    if (data.nextRegenAt !== null) candidates.push(data.nextRegenAt);
+    if (data.retryAt !== null) candidates.push(data.retryAt);
+    const watchdogAt = data.lastFetchAt + WATCHDOG_MS;
+    if (watchdogAt > now) candidates.push(watchdogAt);
+    return Math.min(...candidates);
+  }
+
+  // Fetcher: запрос к getBidLimit (с леджер-фолбэком внутри getBidsBalance) →
+  // обновление хранилища → перепланирование будильника. Вызывается только по
+  // событиям; однопоточность DO даёт single-flight бесплатно.
+  private async refreshInto(data: BudgetData): Promise<void> {
+    const now = Date.now();
     try {
-      value = (await getBidsBalance(this.env)).balance;
+      const b = await getBidsBalance(this.env);
+      if (b.balance === null) throw new Error("getBidLimit недоступен и леджер пуст");
+      data.balance = b.balance;
+      data.unlimited = b.unlimited;
+      if (b.bidLimit !== null) data.bidLimit = b.bidLimit;
+      data.nextRegenAt =
+        !b.unlimited && b.source === "api" && b.bidRefreshSec !== null
+          ? now + b.bidRefreshSec * 1000 + REGEN_SKEW_MS
+          : !b.unlimited && b.nextBidInMinutes !== null
+            ? now + b.nextBidInMinutes * 60_000 + REGEN_SKEW_MS
+            : null;
+      data.lastFetchAt = now;
+      data.retryCount = 0;
+      data.retryAt = null;
     } catch (e) {
-      console.warn("BidBudget getBidsBalance failed:", String(e));
+      console.warn("BidBudget refresh failed:", String(e));
+      // Повтор с отступом (не более двух), дальше — до сторожевого.
+      const delay = RETRY_DELAYS_MS[Math.min(data.retryCount, RETRY_DELAYS_MS.length - 1)];
+      data.retryCount += 1;
+      data.retryAt = data.retryCount <= RETRY_DELAYS_MS.length ? now + delay : null;
     }
-    data.balanceCache = { value, ts: Date.now() };
-    return value;
+    await this.write(data);
+    await this.ctx.storage.setAlarm(this.nextAlarmAt(data, Date.now()));
+  }
+
+  async refresh(): Promise<void> {
+    const data = await this.read();
+    await this.refreshInto(data);
+  }
+
+  // Reader: баланс и минуты до следующего реген-бида для гейта канала,
+  // скоринга и /status. Холодный старт (ни разу не читали) — один refresh;
+  // если endpoint молчит с самого старта, попытки ограничены расписанием
+  // повторов (иначе тики снова превратились бы в опрос каждые 10 с).
+  private coldStartDue(data: BudgetData): boolean {
+    return (
+      data.lastFetchAt === 0 && (data.retryAt === null || Date.now() >= data.retryAt)
+    );
+  }
+
+  async balanceContext(): Promise<{ balance: number | null; nextBidInMinutes: number | null }> {
+    let data = await this.read();
+    if (this.coldStartDue(data)) {
+      await this.refreshInto(data);
+      data = await this.read();
+    }
+    return {
+      balance: data.balance,
+      nextBidInMinutes:
+        data.nextRegenAt !== null
+          ? Math.max(1, Math.round((data.nextRegenAt - REGEN_SKEW_MS - Date.now()) / 60_000))
+          : null,
+    };
+  }
+
+  // Отладка (/test/bids-balance): хранимое состояние целиком.
+  async debugState(): Promise<BudgetData & { alarm: number | null }> {
+    const data = await this.read();
+    return { ...data, alarm: await this.ctx.storage.getAlarm() };
+  }
+
+  // Реальный отказ API на ставке (вдруг «bids закончились» — например, после
+  // ручной ставки из браузера): обновить баланс немедленно.
+  async noteBidFailed(): Promise<void> {
+    await this.refresh();
   }
 
   // Зарезервировать bid под предстоящую ставку. Отказ, если известный баланс
   // минус уже зарезервированные <= 0. null-баланс (не читается) — не блокируем.
   async reserve(): Promise<{ granted: boolean; reservation?: string }> {
-    const data = await this.read();
-    const balance = await this.balance(data);
-    if (balance !== null && balance - data.inFlight <= 0) {
-      await this.write(data);
+    let data = await this.read();
+    if (this.coldStartDue(data)) {
+      await this.refreshInto(data);
+      data = await this.read();
+    }
+    if (data.balance !== null && data.balance - data.inFlight <= 0) {
       return { granted: false };
     }
     data.inFlight += 1;
@@ -464,20 +574,22 @@ export class BidBudget extends DurableObject<Env> {
     await this.write(data);
   }
 
-  // Ставка реально размещена: резерв превращается в трату (ledger пишет bidder).
+  // Ставка реально размещена: резерв превращается в трату (ledger пишет
+  // bidder), баланс обновляем сразу — spend и есть событие траты.
   async spend(reservation: string): Promise<void> {
     const data = await this.read();
     if (data.reservations[reservation] === undefined) return;
     delete data.reservations[reservation];
     data.inFlight = Math.max(0, data.inFlight - 1);
-    await this.write(data);
+    await this.refreshInto(data);
   }
 
-  // Периодическая чистка: резерв, переживший TTL (воркер умер mid-pipeline),
-  // освобождает слот. inFlight восстанавливаем по фактическому списку.
+  // Будильник: чистка протухших резервов + события баланса (реген, повтор
+  // после сбоя, сторожевой раз в час в окне графика). Перепланирование —
+  // по ближайшему событию (nextAlarmAt), цепочка не прерывается.
   async alarm(): Promise<void> {
+    const data = await this.read();
     try {
-      const data = await this.read();
       const now = Date.now();
       let expired = 0;
       for (const [id, expiresAt] of Object.entries(data.reservations)) {
@@ -490,11 +602,28 @@ export class BidBudget extends DurableObject<Env> {
         console.warn("budget.expired-reservations", { expired });
       }
       data.inFlight = Object.keys(data.reservations).length;
-      await this.write(data);
+
+      const regenDue = data.nextRegenAt !== null && now >= data.nextRegenAt;
+      const retryDue = data.retryAt !== null && now >= data.retryAt;
+      const watchdogDue = data.lastFetchAt + WATCHDOG_MS <= now;
+      if (regenDue || retryDue) {
+        // Реген и повтор — в любое время суток (refreshInto сам пишет data).
+        await this.refreshInto(data);
+      } else if (watchdogDue) {
+        const sched = await getSchedule(this.env);
+        if (isWithinSchedule(sched, now)) {
+          await this.refreshInto(data);
+        } else {
+          await this.write(data);
+        }
+      } else {
+        await this.write(data);
+      }
     } catch (e) {
       console.error("budget.alarm failed:", e);
     } finally {
-      await this.ctx.storage.setAlarm(Date.now() + RESERVATION_TTL_MS);
+      const fresh = await this.read();
+      await this.ctx.storage.setAlarm(this.nextAlarmAt(fresh, Date.now()));
     }
   }
 }
@@ -566,8 +695,14 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
     console.warn("fetchOrderArtifacts failed:", { id: order.id, err: String(e) });
   }
 
-  // 4. Скоринг.
-  const score = await scoreOrder(env, order);
+  // 4. Скоринг. Контекст баланса — из BidBudget (RPC, без внешнего запроса).
+  let balanceCtx: { balance: number | null; nextBidInMinutes: number | null } | null = null;
+  try {
+    balanceCtx = await budget.balanceContext();
+  } catch (e) {
+    console.warn("scoreOrder: bids balance unavailable", String(e));
+  }
+  const score = await scoreOrder(env, order, balanceCtx);
 
   if (score === null) {
     await logError(env, "order.error", { id: order.id, err: "scoring-parse-failed" });
@@ -678,6 +813,11 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
       await budget.spend(reservation);
     } else {
       await budget.release(reservation);
+      // Реальный отказ API (не пре-полётный) — обновляем баланс: вдруг bids
+      // закончились (ручная ставка из браузера, рассинхрон).
+      if (bidResult.attempted) {
+        await budget.noteBidFailed().catch((e) => console.warn("noteBidFailed failed:", String(e)));
+      }
     }
 
     // Консоль действий в карточке: sealed покупает код автоматически (корзина),

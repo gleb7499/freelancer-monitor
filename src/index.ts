@@ -15,7 +15,6 @@ import {
 } from "./kimi";
 import { sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
-import { getBidsBalance } from "./bids-balance";
 import { checkMilestones } from "./milestones";
 import { getMode, setMode } from "./mode";
 import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule, applyScheduleDelta, type Schedule } from "./schedule";
@@ -235,15 +234,15 @@ async function handleTgCommand(
   if (trimmed === "/status") {
     const mode = await getMode(env);
     const sched = await getSchedule(env);
-    const balance = await getBidsBalance(env);
+    const balance = await bidBudgetStub(env).balanceContext();
     const stats = await seenStats24h(env);
     const lines = stats.map((s) => `  ${s.status}/${s.source}: ${s.count}`);
     const balanceLine =
       balance.balance === null
         ? "баланс bids: неизвестен (API недоступен)"
-        : `баланс bids: ${balance.balance} [${balance.source}]` +
+        : `баланс bids: ${balance.balance}` +
           (balance.nextBidInMinutes !== null ? ` (след. +1 через ${balance.nextBidInMinutes} мин)` : "");
-    log("tg.status", { mode, balance: balance.balance, source: balance.source });
+    log("tg.status", { mode, balance: balance.balance });
     await sendTelegram(
       env,
       [`режим: ${mode}`, `график откликов: ${formatSchedule(sched)}`, balanceLine, `seen за 24ч:`, ...lines].join("\n"),
@@ -426,7 +425,8 @@ export default {
         return jsonResponse(await readRing(env));
       }
       if (request.method === "GET" && url.pathname === "/test/bids-balance") {
-        return jsonResponse(await getBidsBalance(env));
+        // Хранимое состояние бюджета (баланс событийный, см. BidBudget).
+        return jsonResponse(await bidBudgetStub(env).debugState());
       }
       if (request.method === "POST" && url.pathname === "/test/milestones") {
         let body: { dryRun?: boolean; force?: boolean } = {};

@@ -12,6 +12,9 @@ export interface BidResult {
   placed: boolean;
   bidId?: number;
   reason?: string;
+  // true — был реальный POST ставки (не пре-полётный отказ). По таким отказам
+  // бюджет обновляет баланс (вдруг отказ = «bids закончились»).
+  attempted?: boolean;
   // Запросы этапов после ставки: requested — число созданных запросов,
   // failed — текст ошибки первого сбоя (ставку не отменяет) или null.
   milestones?: { requested: number; failed: string | null };
@@ -208,11 +211,11 @@ export async function placeBid(
     }
   })();
   if (text.toLowerCase().includes("already")) {
-    return { placed: false, reason: "already-bid" };
+    return { placed: false, reason: "already-bid", attempted: true };
   }
   if (res.status === 401) {
     console.error("bidder.oauth-invalid", { id: order.id });
-    return { placed: false, reason: "oauth-invalid" };
+    return { placed: false, reason: "oauth-invalid", attempted: true };
   }
   // Часть заказов требует минимальный баланс на счету (~$20) для ставки.
   const lower = text.toLowerCase();
@@ -223,7 +226,7 @@ export async function placeBid(
     lower.includes("insufficient")
   ) {
     console.error("bidder.insufficient-balance", { id: order.id, status: res.status, text });
-    return { placed: false, reason: `insufficient-balance${apiMessage ? `: ${apiMessage}` : ""}` };
+    return { placed: false, reason: `insufficient-balance${apiMessage ? `: ${apiMessage}` : ""}`, attempted: true };
   }
   // Крипто/премиум-заказы требуют верификации аккаунта (403 RESTRICTED...).
   if (
@@ -231,10 +234,10 @@ export async function placeBid(
     (lower.includes("verified") || lower.includes("verification") || lower.includes("restricted"))
   ) {
     console.error("bidder.verification-required", { id: order.id, text });
-    return { placed: false, reason: "verification-required" };
+    return { placed: false, reason: "verification-required", attempted: true };
   }
   console.error("bidder.failed", { id: order.id, status: res.status, text });
-  return { placed: false, reason: `http-${res.status}${apiMessage ? `: ${apiMessage}` : ""}` };
+  return { placed: false, reason: `http-${res.status}${apiMessage ? `: ${apiMessage}` : ""}`, attempted: true };
 }
 
 // Запросы этапов: отдельная сущность, не часть тела ставки. На каждый элемент

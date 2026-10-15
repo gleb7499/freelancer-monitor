@@ -18,7 +18,6 @@ import {
   buildChannelNote,
   type ScoringContext,
 } from "./prompts";
-import { getBidsBalance } from "./bids-balance";
 import { orderRate } from "./telegram";
 import { sponsoredDailyLeft } from "./upgrades";
 import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
@@ -515,21 +514,21 @@ async function chatWithRetries(
   }
 }
 
-export async function scoreOrder(env: Env, order: Order): Promise<ScoreResult | null> {
+export async function scoreOrder(
+  env: Env,
+  order: Order,
+  balance?: { balance: number | null; nextBidInMinutes: number | null } | null
+): Promise<ScoreResult | null> {
   const cfg = getConfig(env);
-  let bidsCtx: ScoringContext = {
-    bidsBalance: null,
-    nextBidInMinutes: null,
+  // Баланс передаёт вызывающий код (конвейер читает его из BidBudget — RPC
+  // без внешнего запроса). Не передан (приёмка, прямые вызовы) — "unknown".
+  const bidsCtx: ScoringContext = {
+    bidsBalance: balance?.balance ?? null,
+    nextBidInMinutes: balance?.nextBidInMinutes ?? null,
     sponsoredLeft: null,
   };
   try {
-    const b = await getBidsBalance(env);
-    bidsCtx = { ...bidsCtx, bidsBalance: b.balance, nextBidInMinutes: b.nextBidInMinutes };
-  } catch (e) {
-    console.warn("scoreOrder: bids balance unavailable", String(e));
-  }
-  try {
-    bidsCtx = { ...bidsCtx, sponsoredLeft: await sponsoredDailyLeft(env) };
+    bidsCtx.sponsoredLeft = await sponsoredDailyLeft(env);
   } catch (e) {
     console.warn("scoreOrder: sponsored daily limit unavailable", String(e));
   }
