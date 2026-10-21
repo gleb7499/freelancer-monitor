@@ -864,6 +864,12 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
       const upgradesPart =
         score.take_upgrades.includes("sponsored") ? "sponsored" : "без апгрейдов";
       header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, план апгрейдов: ${upgradesPart}`;
+      if (bidResult.recovered) {
+        header += `\n⚠️ ответ на запрос ставки не пришёл (обрыв), но ставка подтверждена сверкой на сайте`;
+      }
+      if (bidResult.bidId === undefined) {
+        header += `\n⚠️ id ставки не получен: этапы и sealed не запрошены, проверь вручную`;
+      }
       if (bidResult.sealPurchase === "no-web-auth") {
         header += `\n⚠️ sealed не куплен: нет веб-авторизации`;
       } else if (bidResult.sealPurchase !== null && bidResult.sealPurchase !== undefined && bidResult.sealPurchase !== "ok") {
@@ -877,6 +883,8 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
       await alert(env, "Ставка отклонена: нужен минимальный баланс ~$20 на счету Freelancer");
     } else if (bidResult.reason === "verification-required") {
       header = `⚠️ Отклик НЕ отправлен: заказ закрыт для нашего аккаунта — платформа требует верификацию Freelancer (категория Cryptocurrency) либо статус Preferred Freelancer`;
+    } else if (bidResult.reason === "unknown-outcome") {
+      header = `⚠️ Исход ставки НЕИЗВЕСТЕН: обрыв связи, сверка со списком ставок не удалась. Проверь заказ на сайте вручную (повторно бот не отправит)`;
     } else if (bidResult.reason === "preferred-only") {
       header = `⚠️ Отклик НЕ отправлен: заказ только для Preferred Freelancer (recruiter-проект) — наш аккаунт не подходит`;
     } else {

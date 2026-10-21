@@ -6,7 +6,7 @@ import { resolveWebAuth, webAuthHeaders, markAuthInvalid, type WebAuth } from ".
 import { buySealedUpgrade } from "./payments";
 import { profileChannel } from "./channels";
 import { resolveProfileId } from "./profiles";
-import { sendTelegram } from "./telegram";
+import { sendTelegram, alert } from "./telegram";
 
 export interface BidResult {
   placed: boolean;
@@ -20,6 +20,8 @@ export interface BidResult {
   milestones?: { requested: number; failed: string | null };
   // Покупка sealed после ставки: "ok" | null (не покупали) | код ошибки.
   sealPurchase?: string | null;
+  // true — ответ на POST не получен (обрыв/таймаут), ставка подтверждена сверкой.
+  recovered?: boolean;
 }
 
 // Собрать тело ставки отдельно — приёмочные проверки используют напрямую.
@@ -141,27 +143,63 @@ export async function placeBid(
   }
   const body = buildBidBody(order.id, bidderId, bidText, score, profileId);
 
-  const res = await fetch(
-    `${cfg.freelancerBase}/bids/?compact=true&new_errors=true&new_pools=true`,
-    {
-      method: "POST",
-      headers: {
-        ...authHeaders,
-        "Content-Type": "application/json",
+  let res: Response | null = null;
+  let networkError: string | null = null;
+  try {
+    res = await fetch(
+      `${cfg.freelancerBase}/bids/?compact=true&new_errors=true&new_pools=true`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20000),
       },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
-    },
-  );
+    );
+  } catch (e) {
+    networkError = String(e).slice(0, 120);
+  }
 
-  if (res.ok) {
-    let bidId: number | undefined;
+  // Обрыв/таймаут: запрос мог дойти до сервера. Сверяемся со списком своих
+  // ставок по заказу, чтобы не потерять размещённую ставку (этапы, sealed,
+  // ledger, карточка) и не принять неразмещённую за размещённую.
+  let recovered = false;
+  let bidId: number | undefined;
+  let placedOk = false;
+  if (res === null) {
+    console.error("bidder.network-error", { id: order.id, err: networkError });
+    const found = await findOwnBid(cfg.freelancerBase, authHeaders, order.id, bidderId);
+    if (found === "error") {
+      await alert(
+        env,
+        `Исход ставки по заказу ${order.id} неизвестен: обрыв связи, сверка не удалась. Проверь вручную на сайте`,
+        { key: "bid-unknown-outcome", ttlSec: 300 },
+      );
+      return { placed: false, reason: "unknown-outcome", attempted: true };
+    }
+    if (found === null) {
+      return { placed: false, reason: `network-error: ${networkError}`, attempted: true };
+    }
+    placedOk = true;
+    recovered = true;
+    bidId = found;
+  } else if (res.ok) {
+    placedOk = true;
     try {
       const data = (await res.json()) as { result?: { id?: number } };
       bidId = data.result?.id;
     } catch {
-      // id не критичен
+      // id восстановим сверкой
     }
+    if (bidId === undefined) {
+      const found = await findOwnBid(cfg.freelancerBase, authHeaders, order.id, bidderId);
+      if (typeof found === "number") bidId = found;
+    }
+  }
+
+  if (placedOk) {
     // Запросы этапов и покупка sealed — после успешной ставки.
     let milestones: { requested: number; failed: string | null } = {
       requested: 0,
@@ -186,6 +224,8 @@ export async function placeBid(
       if (sealPurchase !== "ok") {
         console.warn("bidder.seal-failed", { id: order.id, bidId, reason: sealPurchase });
       }
+    } else {
+      console.warn("bidder.bid-id-missing", { id: order.id });
     }
     await recordBidSpent(env, `bid:${order.id}`);
     console.log("bidder.placed", {
@@ -193,53 +233,115 @@ export async function placeBid(
       bidId,
       milestones: milestones.requested,
       seal: sealPurchase,
+      recovered,
     });
-    return { placed: true, bidId, milestones, sealPurchase };
+    return { placed: true, bidId, milestones, sealPurchase, recovered };
   }
 
-  const text = (await res.text()).slice(0, 300);
+  // Здесь res не null и !res.ok.
+  const failedRes = res as Response;
+  const text = (await failedRes.text()).slice(0, 300);
   // Текст ошибки API для карточки: только безопасные ASCII-символы (заголовок
   // уходит в Telegram с HTML-разметкой, латиница без разметки).
+  const apiFields = parseApiError(text);
   const apiMessage = (() => {
-    try {
-      const m = (JSON.parse(text) as { message?: unknown }).message;
-      if (typeof m !== "string" || m.trim() === "") return null;
-      const clean = m.replace(/[^a-zA-Z0-9 .,'$%()\/:_-]/g, " ").replace(/\s+/g, " ").trim();
-      return clean.slice(0, 140);
-    } catch {
-      return null;
-    }
+    const m = apiFields.message;
+    if (m === null) return null;
+    const clean = m.replace(/[^a-zA-Z0-9 .,'$%()\/:_-]/g, " ").replace(/\s+/g, " ").trim();
+    return clean === "" ? null : clean.slice(0, 140);
   })();
-  if (text.toLowerCase().includes("already")) {
+  // Классификация — по полям ошибки (error_code, message), а не по сырому
+  // телу целиком; если тело не JSON — по тексту.
+  const haystack = apiFields.haystack !== "" ? apiFields.haystack : text.toLowerCase();
+  if (haystack.includes("already")) {
     return { placed: false, reason: "already-bid", attempted: true };
   }
-  if (res.status === 401) {
+  if (failedRes.status === 401) {
     console.error("bidder.oauth-invalid", { id: order.id });
     // Веб-сессия отклонена: останавливаем поисковые каналы до замены сессии.
     if (webAuth) await markAuthInvalid(env, "bid");
     return { placed: false, reason: "oauth-invalid", attempted: true };
   }
   // Часть заказов требует минимальный баланс на счету (~$20) для ставки.
-  const lower = text.toLowerCase();
+  const lower = haystack;
   if (
     lower.includes("balance") ||
     lower.includes("deposit") ||
     lower.includes("funds") ||
     lower.includes("insufficient")
   ) {
-    console.error("bidder.insufficient-balance", { id: order.id, status: res.status, text });
+    console.error("bidder.insufficient-balance", { id: order.id, status: failedRes.status, text });
     return { placed: false, reason: `insufficient-balance${apiMessage ? `: ${apiMessage}` : ""}`, attempted: true };
   }
   // Крипто/премиум-заказы требуют верификации аккаунта (403 RESTRICTED...).
   if (
-    res.status === 403 &&
+    failedRes.status === 403 &&
     (lower.includes("verified") || lower.includes("verification") || lower.includes("restricted"))
   ) {
     console.error("bidder.verification-required", { id: order.id, text });
     return { placed: false, reason: "verification-required", attempted: true };
   }
-  console.error("bidder.failed", { id: order.id, status: res.status, text });
-  return { placed: false, reason: `http-${res.status}${apiMessage ? `: ${apiMessage}` : ""}`, attempted: true };
+  console.error("bidder.failed", { id: order.id, status: failedRes.status, text });
+  return { placed: false, reason: `http-${failedRes.status}${apiMessage ? `: ${apiMessage}` : ""}`, attempted: true };
+}
+
+// Поля ошибки API: message и error_code (плюс вложенный error.*), собранные в
+// строку для классификации. Не JSON — пустые значения.
+export function parseApiError(text: string): { message: string | null; haystack: string } {
+  try {
+    const data = JSON.parse(text) as {
+      message?: unknown;
+      error_code?: unknown;
+      error?: { message?: unknown; code?: unknown } | unknown;
+    };
+    const nested = typeof data.error === "object" && data.error !== null
+      ? (data.error as { message?: unknown; code?: unknown })
+      : {};
+    const parts = [data.message, data.error_code, nested.message, nested.code].filter(
+      (x): x is string => typeof x === "string" && x.trim() !== "",
+    );
+    const message =
+      typeof data.message === "string" && data.message.trim() !== ""
+        ? data.message
+        : typeof nested.message === "string" && nested.message.trim() !== ""
+          ? nested.message
+          : null;
+    return { message, haystack: parts.join(" ").toLowerCase() };
+  } catch {
+    return { message: null, haystack: "" };
+  }
+}
+
+// Сверка после обрыва: есть ли у нас живая ставка на этот заказ.
+// number — id найденной ставки, null — ставки нет, "error" — сверка не удалась.
+export async function findOwnBid(
+  freelancerBase: string,
+  authHeaders: Record<string, string>,
+  projectId: number,
+  bidderId: number,
+): Promise<number | null | "error"> {
+  try {
+    const res = await fetch(
+      `${freelancerBase}/bids/?projects[]=${projectId}&bidders[]=${bidderId}`,
+      { headers: authHeaders, signal: AbortSignal.timeout(15000) },
+    );
+    if (!res.ok) return "error";
+    const data = (await res.json()) as { status?: string; result?: { bids?: unknown } };
+    if (data.status !== "success") return "error";
+    const raw = data.result?.bids;
+    const list: { id?: unknown; project_id?: unknown; bidder_id?: unknown; retracted?: unknown }[] =
+      Array.isArray(raw) ? raw : raw && typeof raw === "object" ? Object.values(raw) : [];
+    for (const b of list) {
+      if (!b || b.retracted === true) continue;
+      if (b.project_id !== undefined && Number(b.project_id) !== projectId) continue;
+      if (b.bidder_id !== undefined && Number(b.bidder_id) !== bidderId) continue;
+      const id = Number(b.id);
+      if (Number.isFinite(id) && id > 0) return id;
+    }
+    return null;
+  } catch {
+    return "error";
+  }
 }
 
 // Запросы этапов: отдельная сущность, не часть тела ставки. На каждый элемент

@@ -11,7 +11,7 @@ import { formatOrderCard, formatPassCard } from "../src/telegram";
 import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
 import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency, bySubmitTsDesc } from "../src/index";
-import { buildBidBody, placeBid } from "../src/bidder";
+import { buildBidBody, placeBid, parseApiError, findOwnBid } from "../src/bidder";
 import { channelById, filterPortfolioByChannel } from "../src/channels";
 import { buySealedUpgrade } from "../src/payments";
 import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "../src/web-auth";
@@ -1309,6 +1309,94 @@ async function testAuthBreaker() {
   eq(isStaleOrder(makeOrder({ submit_ts: 1 }), { maxOrderAgeMin: 0 } as any, now), false, "age: 0 disables");
 }
 
+// ---------- T. исход ставки при обрыве, классификация ошибок ----------
+async function testBidOutcome() {
+  const realFetch = globalThis.fetch;
+  const store = new Map<string, string>([
+    ["mode", "live"],
+    ["fl:auth", JSON.stringify({ userId: "94242579", hash: "test-hash" })],
+  ]);
+  const env = {
+    FREELANCER_API_BASE: "https://www.freelancer.com/api/projects/0.1",
+    TELEGRAM_BOT_TOKEN: "t",
+    TELEGRAM_CHAT_ID: "1",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _o?: unknown) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k),
+    },
+    DB: { prepare: () => ({ bind: () => ({ run: async () => ({}) }), first: async () => null }) },
+  } as any;
+  const order = makeOrder({ id: 77 });
+  const ms = [
+    { description: "Project setup and kickoff", amount: 30 },
+    { description: "Final delivery and handover", amount: 70 },
+  ];
+  const sc = { bid_amount: 100, delivery_days: 5, milestones: ms, profile: "main" } as any;
+  const text = "Bid text " + "long enough ".repeat(12) + "end.";
+  const okJson = (result: unknown) =>
+    new Response(JSON.stringify({ status: "success", result }), { status: 200 });
+
+  type Mode = { post: "throw" | "ok-noid" | "400"; lookup: "found" | "empty" | "fail"; body?: string };
+  const run = async (m: Mode) => {
+    const tg: string[] = [];
+    globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+      const u = String(url);
+      if (u.includes("api.telegram.org")) { tg.push("x"); return okJson({}); }
+      if (u.includes("/bids/") && init?.method === "POST") {
+        if (m.post === "throw") throw new Error("timeout");
+        if (m.post === "400") return new Response(m.body ?? "{}", { status: 400 });
+        return okJson({});
+      }
+      if (u.includes("/bids/")) {
+        if (m.lookup === "fail") return new Response("{}", { status: 500 });
+        if (m.lookup === "empty") return okJson({ bids: [] });
+        return okJson({ bids: [{ id: 4242, project_id: 77, bidder_id: 94242579, retracted: false }] });
+      }
+      if (u.includes("/milestone_requests/")) return okJson({ id: 9 });
+      if (u.endsWith("/carts/")) return okJson({ id: 5 });
+      return okJson({});
+    }) as any;
+    const r = await placeBid(env, order, sc, text);
+    return { r, tg: tg.length };
+  };
+
+  const a = await run({ post: "throw", lookup: "found" });
+  eq(a.r.placed, true, "outcome: timeout + found by lookup -> placed");
+  eq(a.r.bidId, 4242, "outcome: bid id taken from lookup");
+  eq(a.r.recovered, true, "outcome: recovered flag");
+  eq(a.r.milestones?.requested, 2, "outcome: milestones requested after recovery");
+
+  const b = await run({ post: "throw", lookup: "empty" });
+  eq(b.r.placed, false, "outcome: timeout + not found -> not placed");
+  ok((b.r.reason ?? "").startsWith("network-error"), "outcome: network-error reason");
+  eq(b.r.attempted, true, "outcome: attempted so balance refreshes");
+
+  const c = await run({ post: "throw", lookup: "fail" });
+  eq(c.r.placed, false, "outcome: lookup failed -> not placed");
+  eq(c.r.reason, "unknown-outcome", "outcome: unknown-outcome reason");
+  eq(c.tg, 1, "outcome: alert sent on unknown outcome");
+
+  const d = await run({ post: "ok-noid", lookup: "found" });
+  eq(d.r.placed, true, "outcome: ok without id -> placed");
+  eq(d.r.bidId, 4242, "outcome: missing id restored by lookup");
+
+  // Классификация ошибок по полям, не по сырому телу.
+  eq((await run({ post: "400", lookup: "empty", body: JSON.stringify({ message: "You have already bid on this project" }) })).r.reason, "already-bid", "err: already in message");
+  const bal = (await run({ post: "400", lookup: "empty", body: JSON.stringify({ message: "Minimum balance of $20 required" }) })).r.reason ?? "";
+  ok(bal.startsWith("insufficient-balance"), "err: balance in message");
+  const noise = (await run({ post: "400", lookup: "empty", body: JSON.stringify({ message: "Bad request", request_id: "balance-deposit-already" }) })).r.reason ?? "";
+  ok(noise.startsWith("http-400"), "err: keywords outside message/error_code are ignored");
+  eq(parseApiError("not json").haystack, "", "err: non-json has empty haystack");
+  eq(parseApiError(JSON.stringify({ error_code: "X_Y", message: "Hi" })).haystack, "hi x_y", "err: haystack from fields");
+
+  // findOwnBid: чужой/отозванный не считаются.
+  globalThis.fetch = (async () => okJson({ bids: [{ id: 1, project_id: 77, bidder_id: 94242579, retracted: true }, { id: 2, project_id: 78, bidder_id: 94242579 }] })) as any;
+  eq(await findOwnBid("https://x", {}, 77, 94242579), null, "lookup: retracted and other projects ignored");
+
+  globalThis.fetch = realFetch;
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -1321,6 +1409,7 @@ async function testAuthBreaker() {
   await testSearchChannel();
   await testGenerateBidText();
   await testAuthBreaker();
+  await testBidOutcome();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {
