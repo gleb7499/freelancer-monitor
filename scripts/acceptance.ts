@@ -1,7 +1,7 @@
 // Виртуальная приёмка логики перед live-режимом.
 // Запуск: npm run acceptance
 import { normalizeScore, validateScore, sanitizeBidText, capBidText, generateBidText } from "../src/kimi";
-import { isAwarded } from "../src/milestones";
+import { isAwarded, checkMilestones, pollDecision, allTerminal } from "../src/milestones";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts, mapUsersResponse, CRYPTO_SKILL_ID } from "../src/enrich";
 import { parseFeedBody, mapFeedItem, mapCardToProject } from "../src/sources/freelancer-active";
 import { fetchSearchOrders, parseSearchBody } from "../src/sources/freelancer-search";
@@ -1397,6 +1397,91 @@ async function testBidOutcome() {
   globalThis.fetch = realFetch;
 }
 
+// ---------- U. опрос этапов: назначенные часто, неназначенные редко, старые и закрытые удаляются ----------
+async function testMilestonePolling() {
+  const realFetch = globalThis.fetch;
+  const now = Date.now();
+  const DAY = 86400_000;
+  const mk = (statuses: string[], ts: number, polled?: number) =>
+    JSON.stringify({
+      project_id: 100,
+      ts,
+      ...(polled !== undefined ? { polled_ts: polled } : {}),
+      requests: statuses.map((st, i) => ({ id: i + 1, amount: 10, description: "d", ...(st ? { status: st } : {}) })),
+    });
+  const store = new Map<string, string>([
+    ["fl:auth", JSON.stringify({ userId: "94242579", hash: "h" })],
+    ["ms:req:1", mk([""], now - 2 * DAY)], // назначена
+    ["ms:req:2", mk([""], now - 2 * DAY)], // не назначена, ещё не опрашивалась
+    ["ms:req:3", mk([""], now - 2 * DAY)], // отозвана
+    ["ms:req:4", mk([""], now - 20 * DAY)], // не назначена, старше 14 дней
+    ["ms:req:5", mk(["released", "released"], now - 2 * DAY)], // всё закрыто
+    ["ms:req:6", mk([""], now - 2 * DAY, now - 3600_000)], // не назначена, опрошена час назад
+  ]);
+  const env = {
+    FREELANCER_API_BASE: "https://www.freelancer.com/api/projects/0.1",
+    TELEGRAM_BOT_TOKEN: "t",
+    TELEGRAM_CHAT_ID: "1",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _o?: unknown) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k),
+      // Страницы по 2 ключа: проверка пагинации.
+      list: async (o: { prefix?: string; cursor?: string }) => {
+        const all = [...store.keys()].filter((k) => k.startsWith(o.prefix ?? "")).sort();
+        const from = o.cursor ? Number(o.cursor) : 0;
+        const page = all.slice(from, from + 2);
+        const complete = from + 2 >= all.length;
+        return { keys: page.map((name) => ({ name })), list_complete: complete, cursor: complete ? undefined : String(from + 2) };
+      },
+    },
+  } as any;
+  const polled: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    const u = String(url);
+    if (u.includes("/milestone_requests/")) {
+      polled.push(u.match(/bids\[\]=(\d+)/)?.[1] ?? "?");
+      return new Response(JSON.stringify({ status: "success", result: { milestone_requests: [] } }), { status: 200 });
+    }
+    if (u.includes("/bids/")) {
+      return new Response(
+        JSON.stringify({
+          status: "success",
+          result: {
+            bids: [
+              { id: 1, project_id: 100, amount: 10, time_awarded: 1700000000 },
+              { id: 2, project_id: 100, amount: 10 },
+              { id: 3, project_id: 100, amount: 10, retracted: true },
+              { id: 6, project_id: 100, amount: 10 },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ status: "success", result: { projects: [] } }), { status: 200 });
+  }) as any;
+
+  await checkMilestones(env, { force: true });
+  eq(polled.sort(), ["1", "2"], "ms poll: awarded and never-polled unawarded only");
+  ok(!store.has("ms:req:3"), "ms poll: retracted bid key dropped");
+  ok(!store.has("ms:req:4"), "ms poll: old unawarded key dropped");
+  ok(!store.has("ms:req:5"), "ms poll: all-released key dropped");
+  ok(store.has("ms:req:6"), "ms poll: recently polled unawarded key kept");
+
+  polled.length = 0;
+  await checkMilestones(env, { force: true });
+  eq(polled, ["1"], "ms poll: second pass polls only awarded bid");
+
+  // Чистые функции политики.
+  eq(allTerminal({ requests: [{ status: "released" }, { status: "cancelled" }] }), true, "ms: all terminal");
+  eq(allTerminal({ requests: [{ status: "released" }, {}] }), false, "ms: not all terminal");
+  eq(pollDecision({ requests: [{}], ts: now }, { awarded: true, retracted: false, now }), "poll", "ms: awarded -> poll");
+  eq(pollDecision({ requests: [{}], ts: now, polled_ts: now - 1000 }, { awarded: false, retracted: false, now }), "skip", "ms: unawarded recently polled -> skip");
+
+  globalThis.fetch = realFetch;
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -1410,6 +1495,7 @@ async function testBidOutcome() {
   await testGenerateBidText();
   await testAuthBreaker();
   await testBidOutcome();
+  await testMilestonePolling();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {
