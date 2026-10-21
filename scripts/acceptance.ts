@@ -16,6 +16,7 @@ import { buySealedUpgrade } from "../src/payments";
 import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "../src/web-auth";
 import { alert as tgAlert } from "../src/telegram";
 import { isStaleOrder } from "../src/durable";
+import { buildBidMilestonesNote } from "../src/prompts";
 import { bidTargetRange, buildBidUserMessage, buildScoringSystemPrompt, buildBidTextSystemPrompt, buildScoringUserMessage, HUMANIZE_SYSTEM_PROMPT } from "../src/prompts";
 import type { Order } from "../src/types";
 
@@ -1194,6 +1195,10 @@ async function testGenerateBidText() {
   const r5 = await generateBidText(env, makeOrder({ id: 889, description: "tiny" }), messages);
   eq(calls, 3, "bidtext: over-target text -> draft, humanize, one target pass");
   eq(r5, "Short enough.", "bidtext: target pass result used");
+  ok(
+    /Do NOT describe the payment structure/.test(buildBidMilestonesNote()),
+    "bidtext: milestones note forbids payment structure in text",
+  );
 
   globalThis.fetch = realFetch;
 }

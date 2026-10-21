@@ -633,13 +633,7 @@ export function buildBidMessages(
     }
   }
   if (score.milestones && score.milestones.length > 0) {
-    const lines = score.milestones
-      .map((m) => {
-        const share = Math.round((m.amount / score.bid_amount) * 100);
-        return `${share}% - ${m.description}`;
-      })
-      .join("\n");
-    notes.push(buildBidMilestonesNote(lines));
+    notes.push(buildBidMilestonesNote());
   }
   notes.push(buildBidPriceNote(score.bid_amount, order.currency_code));
   return [

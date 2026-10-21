@@ -151,8 +151,8 @@ export function buildBidPortfolioNote(portfolioLines: string): string {
   return fill(text(bidUserPortfolioMd), { PORTFOLIO_LINES: portfolioLines });
 }
 
-export function buildBidMilestonesNote(milestonesLines: string): string {
-  return fill(text(bidUserMilestonesMd), { MILESTONES_LINES: milestonesLines });
+export function buildBidMilestonesNote(): string {
+  return text(bidUserMilestonesMd);
 }
 
 export function buildBidPriceNote(bidAmount: number, currency: string): string {
