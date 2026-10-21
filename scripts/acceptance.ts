@@ -14,6 +14,9 @@ import { runWithConcurrency, bySubmitTsDesc } from "../src/index";
 import { buildBidBody, placeBid } from "../src/bidder";
 import { channelById, filterPortfolioByChannel } from "../src/channels";
 import { buySealedUpgrade } from "../src/payments";
+import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "../src/web-auth";
+import { alert as tgAlert } from "../src/telegram";
+import { isStaleOrder } from "../src/durable";
 import type { Order } from "../src/types";
 
 let pass = 0;
@@ -1235,6 +1238,77 @@ async function testGenerateBidText() {
   globalThis.fetch = realFetch;
 }
 
+// ---------- S. выключатель протухшей авторизации, алерты по ключу, возраст заказа ----------
+async function testAuthBreaker() {
+  const realFetch = globalThis.fetch;
+  const store = new Map<string, string>([
+    ["mode", "live"],
+    ["fl:auth", JSON.stringify({ userId: "94242579", hash: "test-hash" })],
+  ]);
+  const env = {
+    FREELANCER_API_BASE: "https://www.freelancer.com/api/projects/0.1",
+    TELEGRAM_BOT_TOKEN: "t",
+    TELEGRAM_CHAT_ID: "1",
+    ORDERS_KV: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string, _o?: unknown) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k),
+    },
+    DB: { prepare: () => ({ bind: () => ({ run: async () => ({}) }), first: async () => null }) },
+  } as any;
+  const sent: string[] = [];
+  let bidStatus = 401;
+  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
+    if (String(url).includes("api.telegram.org")) {
+      sent.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+    if (String(url).includes("/bids/")) return new Response("{}", { status: bidStatus });
+    return new Response(JSON.stringify({ status: "success", result: {} }), { status: 200 });
+  }) as any;
+
+  // Флаг: ставим один раз, один алерт, повторная пометка ничего не делает.
+  eq(await isAuthInvalid(env), false, "breaker: initially clear");
+  await markAuthInvalid(env, "feed");
+  eq(await isAuthInvalid(env), true, "breaker: set by feed 401");
+  eq(sent.length, 1, "breaker: one alert on transition");
+  await markAuthInvalid(env, "feed");
+  eq(sent.length, 1, "breaker: no repeated alert while flagged");
+  // Флаг bidder'а не снимается успешным опросом feed, флаг feed — снимается.
+  await clearAuthInvalid(env, { onlyFeed: true });
+  eq(await isAuthInvalid(env), false, "breaker: feed success clears feed flag");
+  await markAuthInvalid(env, "bid");
+  eq(await clearAuthInvalid(env, { onlyFeed: true }), false, "breaker: feed success keeps bid flag");
+  eq(await isAuthInvalid(env), true, "breaker: bid flag still set");
+  eq(await clearAuthInvalid(env), true, "breaker: new session clears any flag");
+  eq(await isAuthInvalid(env), false, "breaker: cleared by new session");
+
+  // Алерты разных типов не глушат друг друга, один тип — не чаще раза за TTL.
+  sent.length = 0;
+  await tgAlert(env, "a", { key: "k1" });
+  await tgAlert(env, "a2", { key: "k1" });
+  await tgAlert(env, "b", { key: "k2" });
+  eq(sent.length, 2, "alert: throttle per key, other key not suppressed");
+
+  // 401 на ставке с веб-сессией ставит флаг.
+  store.delete("tg:alert:auth-expired");
+  const order = makeOrder({});
+  const sc = { bid_amount: 100, delivery_days: 5, milestones: null, profile: "main" } as any;
+  const res = await placeBid(env, order, sc, "Bid text " + "long enough ".repeat(12) + "end.");
+  eq(res.reason, "oauth-invalid", "breaker: 401 on bid -> oauth-invalid");
+  eq(await isAuthInvalid(env), true, "breaker: 401 on bid sets flag");
+
+  globalThis.fetch = realFetch;
+
+  // Возраст заказа: только свежее.
+  const now = 1_800_000_000_000;
+  const c20 = { maxOrderAgeMin: 20 } as any;
+  eq(isStaleOrder(makeOrder({ submit_ts: now / 1000 - 19 * 60 }), c20, now), false, "age: 19 min is fresh");
+  eq(isStaleOrder(makeOrder({ submit_ts: now / 1000 - 21 * 60 }), c20, now), true, "age: 21 min is stale");
+  eq(isStaleOrder(makeOrder({ submit_ts: 0 }), c20, now), false, "age: unknown ts not stale");
+  eq(isStaleOrder(makeOrder({ submit_ts: 1 }), { maxOrderAgeMin: 0 } as any, now), false, "age: 0 disables");
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -1246,6 +1320,7 @@ async function testGenerateBidText() {
   await testBidderPayments();
   await testSearchChannel();
   await testGenerateBidText();
+  await testAuthBreaker();
   testCards();
   console.log(`\nPASS: ${pass}, FAIL: ${fail}`);
   if (failures.length) {

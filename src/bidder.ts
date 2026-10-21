@@ -2,7 +2,7 @@ import type { Env, Order, ScoreResult } from "./types";
 import { getConfig } from "./config";
 import { recordBidSpent } from "./bids-balance";
 import { getMode } from "./mode";
-import { resolveWebAuth, webAuthHeaders, type WebAuth } from "./web-auth";
+import { resolveWebAuth, webAuthHeaders, markAuthInvalid, type WebAuth } from "./web-auth";
 import { buySealedUpgrade } from "./payments";
 import { profileChannel } from "./channels";
 import { resolveProfileId } from "./profiles";
@@ -215,6 +215,8 @@ export async function placeBid(
   }
   if (res.status === 401) {
     console.error("bidder.oauth-invalid", { id: order.id });
+    // Веб-сессия отклонена: останавливаем поисковые каналы до замены сессии.
+    if (webAuth) await markAuthInvalid(env, "bid");
     return { placed: false, reason: "oauth-invalid", attempted: true };
   }
   // Часть заказов требует минимальный баланс на счету (~$20) для ставки.

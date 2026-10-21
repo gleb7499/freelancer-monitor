@@ -121,6 +121,7 @@ BID_MIN_SCORE            — minimum value_score to bid
 PHASE_MAX_BIDS           — phase-0 competition ceiling (reject above)
 PHASE_BUDGET_FIXED_USD   — phase-0 fixed budget ceiling
 PHASE_BUDGET_HOURLY_USD  — phase-0 hourly rate ceiling
+MAX_ORDER_AGE_MIN        — skip orders older than N minutes at intake (default 20; 0 = off)
 ```
 
 Secrets — only via `wrangler secret` / dashboard, never in the repo:

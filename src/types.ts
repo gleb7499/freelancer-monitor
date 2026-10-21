@@ -123,6 +123,8 @@ export interface Env {
   PHASE_MAX_BIDS: string;
   PHASE_BUDGET_FIXED_USD: string;
   PHASE_BUDGET_HOURLY_USD: string;
+  // Макс. возраст заказа на входе, мин (по умолчанию 20; 0 — без ограничения).
+  MAX_ORDER_AGE_MIN?: string;
   // "1" — включить Android-канал (профиль 35766270). В проде отсутствует.
   CHANNEL_ANDROID_ENABLED?: string;
   // Дurable Objects новой архитектуры каналов (классы добавляет отдельный агент).

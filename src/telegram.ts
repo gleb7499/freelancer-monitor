@@ -350,13 +350,20 @@ export async function deleteMessage(
   });
 }
 
-export async function alert(env: Env, text: string): Promise<void> {
-  const key = "tg:alert";
+// Алерт оператору. Throttle — по ключу типа алерта (по умолчанию один ключ на
+// все «общие» алерты), чтобы алерт одного типа не глушил другой. Флаг ставится
+// после успешной отправки: неудавшийся алерт повторится на следующем событии.
+export async function alert(
+  env: Env,
+  text: string,
+  opts: { key?: string; ttlSec?: number } = {},
+): Promise<void> {
+  const key = `tg:alert:${opts.key ?? "generic"}`;
   const existing = await env.ORDERS_KV.get(key);
   if (existing) return;
   try {
     await sendTelegram(env, `⚠️ ${escHtml(text)}`);
-    await env.ORDERS_KV.put(key, "1", { expirationTtl: 3600 });
+    await env.ORDERS_KV.put(key, "1", { expirationTtl: opts.ttlSec ?? 3600 });
   } catch (err) {
     console.warn("alert failed:", err);
   }
