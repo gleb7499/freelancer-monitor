@@ -42,7 +42,7 @@ function sleep(ms: number): Promise<void> {
 async function chat(
   env: Env,
   messages: { role: string; content: string }[],
-  opts?: { jsonSchema?: object }
+  opts?: { jsonSchema?: object; tag?: string }
 ): Promise<string> {
   const cfg = getConfig(env);
   const body: Record<string, unknown> = {
@@ -71,7 +71,29 @@ async function chat(
   }
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+      completion_tokens_details?: { reasoning_tokens?: number };
+      cached_tokens?: number;
+    };
   };
+  // Учёт токенов: без него не проверить, работает ли prefix-кеш провайдера
+  // (cached_tokens) и сколько уходит на reasoning. Только лог, поведение не меняется.
+  const u = data.usage;
+  console.log(
+    JSON.stringify({
+      step: "llm.usage",
+      tag: opts?.tag ?? "chat",
+      model: cfg.kimiModel,
+      prompt: u?.prompt_tokens ?? null,
+      cached: u?.prompt_tokens_details?.cached_tokens ?? u?.cached_tokens ?? null,
+      cache_write: u?.prompt_tokens_details?.cache_write_tokens ?? null,
+      completion: u?.completion_tokens ?? null,
+      reasoning: u?.completion_tokens_details?.reasoning_tokens ?? null,
+    }),
+  );
   return data.choices?.[0]?.message?.content ?? "";
 }
 
@@ -498,12 +520,13 @@ export function normalizeScore(
 async function chatWithRetries(
   env: Env,
   messages: { role: string; content: string }[],
-  useSchema: boolean
+  useSchema: boolean,
+  tag: string
 ): Promise<string> {
   const delays = [5000, 15000];
   for (let attempt = 0; ; attempt++) {
     try {
-      return await chat(env, messages, useSchema ? { jsonSchema: SCORING_JSON_SCHEMA } : undefined);
+      return await chat(env, messages, useSchema ? { jsonSchema: SCORING_JSON_SCHEMA, tag } : { tag });
     } catch (e) {
       if (e instanceof KimiError && e.status === 429 && attempt < delays.length) {
         await sleep(delays[attempt]);
@@ -539,11 +562,11 @@ export async function scoreOrder(
   let useSchema = !jsonSchemaDegraded;
   let raw: string;
   try {
-    raw = await chatWithRetries(env, messages, useSchema);
+    raw = await chatWithRetries(env, messages, useSchema, "score");
   } catch (e) {
     if (useSchema && e instanceof KimiError && looksLikeSchemaError(e)) {
       jsonSchemaDegraded = true;
-      raw = await chatWithRetries(env, messages, false);
+      raw = await chatWithRetries(env, messages, false, "score");
     } else {
       throw e;
     }
@@ -587,11 +610,11 @@ export async function scoreOrder(
     },
   ];
   try {
-    raw = await chatWithRetries(env, retryMessages, !jsonSchemaDegraded);
+    raw = await chatWithRetries(env, retryMessages, !jsonSchemaDegraded, "score-retry");
   } catch (e) {
     if (jsonSchemaDegraded === false && e instanceof KimiError && looksLikeSchemaError(e)) {
       jsonSchemaDegraded = true;
-      raw = await chatWithRetries(env, retryMessages, false);
+      raw = await chatWithRetries(env, retryMessages, false, "score-retry");
     } else {
       throw e;
     }
@@ -717,7 +740,7 @@ export async function generateBidText(
   let draft: string | null = null;
   for (let attempt = 0; attempt < 2 && draft === null; attempt++) {
     try {
-      const raw = await chat(env, messages);
+      const raw = await chat(env, messages, { tag: "bid-draft" });
       const text = sanitizeBidText(raw);
       if (text.length > 0) {
         draft = text;
@@ -752,7 +775,7 @@ export async function generateBidText(
     console.warn("generateBidText: save draft failed:", String(e));
   }
   try {
-    const humanized = sanitizeBidText(await chat(env, conv));
+    const humanized = sanitizeBidText(await chat(env, conv, { tag: "humanize" }));
     if (humanized.length > 0) {
       text = humanized;
     } else {
@@ -774,7 +797,7 @@ export async function generateBidText(
       content: buildHumanizeLimitMessage(text.length, BID_TEXT_MAX_CHARS),
     });
     try {
-      const shorter = sanitizeBidText(await chat(env, conv));
+      const shorter = sanitizeBidText(await chat(env, conv, { tag: "humanize-shorten" }));
       if (shorter.length === 0) break;
       text = shorter;
       conv.push({ role: "assistant", content: text });
