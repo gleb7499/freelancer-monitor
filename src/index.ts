@@ -1,4 +1,4 @@
-import type { Env, Order, UpgradeId } from "./types";
+import type { Env, Order } from "./types";
 import { getConfig } from "./config";
 import { fetchPortfolio } from "./enrich";
 import { seenStats24h } from "./service";
@@ -14,7 +14,6 @@ import {
   KimiError,
 } from "./kimi";
 import { sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessage, deleteMessage } from "./telegram";
-import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { checkMilestones } from "./milestones";
 import { getMode, setMode } from "./mode";
 import { clearAuthInvalid } from "./web-auth";
@@ -82,14 +81,6 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ order, score: null, reason: "scoring parse failed" });
     }
     clampWeeklyLimit(score, getConfig(env));
-    let removedUpgrades: UpgradeId[] = [];
-    if (score.verdict === "BID") {
-      const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-      if (cap.removed.length > 0) {
-        score.take_upgrades = cap.kept;
-        removedUpgrades = cap.removed;
-      }
-    }
     let bidText: string | null = null;
     if (score.verdict === "BID") {
       try {
@@ -104,9 +95,7 @@ async function handleTestScore(request: Request, env: Env): Promise<Response> {
       order,
       score,
       bidText,
-      upgradePrices: priceUpgrades(score.take_upgrades, score.bid_amount),
     };
-    if (removedUpgrades.length > 0) response.removedUpgrades = removedUpgrades;
     return jsonResponse(response);
   } catch (e) {
     if (e instanceof KimiError) {

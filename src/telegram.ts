@@ -76,28 +76,11 @@ export function formatPassCard(order: Order, score: ScoreResult): string {
   return parts.join("\n\n");
 }
 
-// Блок ручных действий в карточке BID: sealed покупает код автоматически
-// (через корзину платежей), ручных действий по нему нет; sponsored — единственный
-// ручной/полуручной апгрейд: на усмотрение оператора по статусу слота.
-// bidId=null в test-режиме (ставка не размещена — ссылки нет).
-export interface ManualActions {
-  bidId: number | null;
-  // null — слот не проверен (запрос bids не удался).
-  slotFree: boolean | null;
-  // Ценовая метка sponsored из priceUpgrades, напр. "sponsored ~$1.90".
-  sponsoredPrice: string;
-  // Если код выкинул sponsored из плана — причина вместо статуса слота.
-  sponsoredRemovedNote?: string;
-  // Test-режим: ставка не размещена, ссылку на bid не печатаем.
-  test?: boolean;
-}
-
 // Карточка только для вердикта BID (после placeBid).
 export function formatOrderCard(
   order: Order,
   score: ScoreResult,
   bidText: string | null,
-  manualActions?: ManualActions | null,
 ): string {
   const values: Record<string, string> = {
     REASON: escHtml(score.reason),
@@ -150,21 +133,6 @@ export function formatOrderCard(
     for (const m of score.milestones) {
       const share = score.bid_amount > 0 ? Math.round((m.amount / score.bid_amount) * 100) : 0;
       lines.push(`${share}% - ${escHtml(m.description)}: ${order.currency_sign}${m.amount}`);
-    }
-    parts.push(lines.join("\n"));
-  }
-
-  // Консоль действий: sponsored — по статусу слота (sealed — автоматически).
-  if (manualActions) {
-    const ma = manualActions;
-    const lines = ["🛠 Ручные действия:"];
-    if (ma.sponsoredRemovedNote) {
-      lines.push(`1. ${ma.sponsoredPrice} - не берём: ${escHtml(ma.sponsoredRemovedNote)}`);
-    } else if (score.take_upgrades.includes("sponsored")) {
-      const slot = ma.slotFree === null ? "не проверен" : ma.slotFree ? "свободен" : "занят";
-      lines.push(`1. ${ma.sponsoredPrice} - слот ${slot} (по желанию)`);
-    } else {
-      lines.push("1. Нет — sealed куплен автоматически, sponsored не нужен");
     }
     parts.push(lines.join("\n"));
   }

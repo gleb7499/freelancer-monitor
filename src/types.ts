@@ -67,7 +67,6 @@ export interface ScoreResult {
   weekly_limit_hours: number | null;
   delivery_days: number;
   deadline_caveat: string | null;
-  take_upgrades: UpgradeId[];
   value_score: number;
   ai_hours: number;
   // План этапов: описание и финальная сумма в валюте заказа. Состав и доли
@@ -76,8 +75,6 @@ export interface ScoreResult {
   // Доли в процентах, первый всегда 30, сумма 100.
   milestones: { description: string; amount: number }[] | null;
 }
-
-export type UpgradeId = "sealed" | "sponsored";
 
 // Информация о заказчике (enrich.fetchProjectClient). Источник — закрытый
 // эндпоинт users/0.1/users (freelancer-auth-v2): verification,

@@ -1,2 +1,2 @@
-Bids balance: {{BIDS_BALANCE}}; next bid regenerates in (minutes): {{NEXT_BID_MINUTES}}; sponsored purchases left today: {{SPONSORED_LEFT}}.
+Bids balance: {{BIDS_BALANCE}}; next bid regenerates in (minutes): {{NEXT_BID_MINUTES}}.
 Score this order:
