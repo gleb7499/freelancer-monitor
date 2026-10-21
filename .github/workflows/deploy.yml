@@ -18,6 +18,8 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run gen:rules
+      - run: npm run acceptance
 
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
