@@ -370,3 +370,75 @@ account_balances, membership_package, badges` есть в схеме ответ�
 - `POST /milestones/` и release-действия живьём.
 - Паттерн скачивания вложений проекта (`attachments[].file_id` → предположение
   `https://www.freelancer.com/api/files/0.1/files/{file_id}/` не проверено).
+
+---
+
+# Архив: раздел «Техника» из правил отбора (вынесен 2026-10-21)
+
+Модели скоринга он не нужен, поэтому убран из `rules/freelancer-правила-отбора.md`; текст сохранён здесь без изменений (часть описаний устарела: см. выше).
+
+### Техника: публичный JSON API проектов
+
+Эндпоинт (тот, что использует сам сайт; работает без авторизации):
+
+```
+GET https://www.freelancer.com/api/projects/0.1/projects/active/
+```
+
+### Рабочие параметры (проверено)
+
+| Параметр | Что делает | Пример |
+| --- | --- | --- |
+| `query` | Булев поиск: `AND OR NOT` (капс), `"точная фраза"`, `(скобки)` | `spring AND boot NOT python` |
+| `jobs[]` | Скиллы по ID | `jobs[]=9&jobs[]=2370` |
+| `project_types[]` | `fixed` или `hourly` | `project_types[]=fixed` |
+| `languages[]` | Язык проекта | `languages[]=en` |
+| `sort_field` | `submitdate` (свежие) | `submitdate` |
+| `limit` | Максимум 100 | `100` |
+| `full_description` | `true` — полный текст описания | `true` |
+| `compact` | Облегчённый JSON (всегда включать) | `true` |
+
+Ответ: `result.projects[]` + `result.total_count`.
+
+### Поля проекта под скоринг
+
+- `id`, `title`, `description`, `seo_url`
+- `type` + `budget{minimum,maximum}`, `currency{code, exchange_rate}`
+- `bid_stats{bid_count, bid_avg}`
+- `submitdate` (unix), `bidperiod`, `language`
+- `upgrades{featured, sealed, NDA, urgent, recruiter, fulltime}`
+- `active_prepaid_milestone`, `is_escrow_project`, `hidebids`
+
+### Этикет и устойчивость
+
+- Заголовок `User-Agent` обычного браузера — с пустым часть CDN режет.
+- Эндпоинт внутренний/неофициальный: может измениться → держать fallback.
+- Автосабмит ставок: официальный bids API с OAuth — допустим по ToS при
+  использовании официального API.
+
+## Ставка через скрытый веб-API
+
+Ставки идут через тот же веб-API, что фронт платформы, с заголовком
+`freelancer-auth-v2` (веб-сессия из KV `fl:auth`; официальный bids API с
+OAuth/Bearer ставку не поставил — проверено).
+
+```
+POST https://www.freelancer.com/api/projects/0.1/bids/?compact=true&new_errors=true&new_pools=true
+Headers: freelancer-auth-v2: <userId>;<hash>, Content-Type: application/json
+Body: {project_id, bidder_id, description, amount, period, milestone_percentage, showcases}
+```
+
+`amount` — в валюте проекта; `period` — дни; `bidder_id` — id из
+веб-авторизации; `showcases` — всегда `[]`; `milestone_percentage` — 50 при
+плане из 2+ этапов (константа фронта), 100 при одном этапе (мелкий fixed) и
+hourly. Описание короче 100 символов — сервер отвечает 500 (режем до запроса).
+
+Этапы — отдельные запросы сразу после ставки (по одному на этап):
+`POST .../milestone_requests/` с `{project_id, bid_id, description, amount}`;
+сумма этапов ≡ сумме ставки (согласует скоринг).
+
+Апгрейды покупаются отдельно: sealed — кодом ВСЕГДА, через корзину платежей
+`POST /api/payments/0.1/carts/` → `POST .../carts/<id>/cart_items/`
+(`context_type: "bid_upgrade"`, `context_sub_type: 3` = sealed, $0.10, USD)
+→ `PUT .../carts/<id>` `{action: "process"}` (списание — на третьем шаге);
+sponsored — ручная покупка по выбору скоринга.

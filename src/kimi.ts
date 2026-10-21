@@ -19,7 +19,6 @@ import {
   type ScoringContext,
 } from "./prompts";
 import { orderRate } from "./telegram";
-import { sponsoredDailyLeft } from "./upgrades";
 import { loadOrderContext, updateOrderContext, type OrderContext } from "./order-context";
 import type { ProfileId } from "./channels";
 import { filterPortfolioByChannel, profileChannel, ENABLED_PROFILES } from "./channels";
@@ -144,6 +143,10 @@ export function validateScore(s: any, order: Order): string[] {
   if (typeof s.summary_ru !== "string" || s.summary_ru.trim() === "") {
     errors.push("summary_ru must be a non-empty string");
   }
+  // PASS: остальные поля не используются (карточка PASS показывает reason и
+  // red_flags), строгая проверка только плодила ретраи — normalizeScore
+  // дополняет недостающее значениями по умолчанию.
+  if (s.verdict === "PASS") return errors;
   if (
     s.hours === null ||
     typeof s.hours !== "object" ||
@@ -178,30 +181,9 @@ export function validateScore(s: any, order: Order): string[] {
     (s.verdict === "BID" && s.bid_amount <= 0)
   ) {
     errors.push("bid_amount must be a non-negative number (positive for BID)");
-  } else if (s.verdict === "BID") {
-    // Sanity-диапазон только для BID: для PASS модель ставит фиктивный bid.
-    // Проверяем в родной валюте заказа (budget_*_original); fallback на USD-поля.
-    const native =
-      typeof order.budget_min_original === "number" &&
-      typeof order.budget_max_original === "number" &&
-      order.budget_max_original > 0;
-    const usd =
-      !native &&
-      typeof order.budget_min === "number" &&
-      typeof order.budget_max === "number" &&
-      order.budget_max > 0;
-    if (native || usd) {
-      const minB = native ? order.budget_min_original : order.budget_min;
-      const maxB = native ? order.budget_max_original : order.budget_max;
-      const lo = minB * 0.5;
-      const hi = Math.min(maxB * 1.5, 50000);
-      if (s.bid_amount < lo || s.bid_amount > hi) {
-        errors.push(
-          `bid_amount ${s.bid_amount} outside sanity range [${lo}, ${hi}] (${native ? order.currency_code : "USD"})`
-        );
-      }
-    }
   }
+  // Сумму ставки задаёт код (низ вилки бюджета), поле от модели — заглушка:
+  // диапазон не проверяем, нужно лишь положительное число.
   if (
     typeof s.delivery_days !== "number" ||
     !Number.isFinite(s.delivery_days) ||
@@ -285,20 +267,6 @@ export function validateScore(s: any, order: Order): string[] {
       }
     }
   }
-  const UPGRADE_IDS = ["sponsored"];
-  if (!Array.isArray(s.take_upgrades)) {
-    errors.push("take_upgrades must be an array");
-  } else if (
-    s.take_upgrades.some(
-      (x: unknown) => typeof x !== "string" || !UPGRADE_IDS.includes(x)
-    )
-  ) {
-    errors.push(
-      "take_upgrades items must be \"sponsored\" (sealed is bought by code always)"
-    );
-  } else if (new Set(s.take_upgrades).size !== s.take_upgrades.length) {
-    errors.push("take_upgrades must not contain duplicates");
-  }
   return errors;
 }
 
@@ -308,12 +276,32 @@ function feeFor(order: Order, bid: number, rate: number): number {
   return order.type === "hourly" ? bid * 0.1 : Math.max(bid * 0.1, 5 * rate);
 }
 
+// PASS без числовых полей: дополняем нулями/пустыми значениями.
+function withPassDefaults(s: any): any {
+  if (s.verdict !== "PASS") return s;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const h = s.hours && typeof s.hours === "object" ? s.hours : {};
+  const strs = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  return {
+    ...s,
+    hours: { opt: num(h.opt), real: num(h.real), pess: num(h.pess) },
+    red_flags: strs(s.red_flags),
+    check_manually: strs(s.check_manually),
+    bid_amount: num(s.bid_amount),
+    delivery_days: num(s.delivery_days),
+    deadline_caveat: typeof s.deadline_caveat === "string" ? s.deadline_caveat : null,
+    ai_hours: num(s.ai_hours),
+  };
+}
+
 export function normalizeScore(
-  s: any,
+  raw: any,
   order: Order,
   cfg: Config,
   env?: Pick<Env, "CHANNEL_ANDROID_ENABLED">,
 ): ScoreResult {
+  const s = withPassDefaults(raw);
   const rate = orderRate(order);
   // Профиль: выделенный канал решает жёстко; feed — выбор LLM (валидность
   // уже проверил validateScore), fallback "main" если выбор недоступен/выключен.
@@ -469,7 +457,6 @@ export function normalizeScore(
       weekly_limit_hours: weeklyLimit,
       delivery_days: s.delivery_days,
       deadline_caveat: s.deadline_caveat,
-      take_upgrades: s.take_upgrades,
       value_score: valueScore,
       ai_hours: s.ai_hours,
       milestones: null,
@@ -488,7 +475,6 @@ export function normalizeScore(
     weekly_limit_hours: weeklyLimit,
     delivery_days: s.delivery_days,
     deadline_caveat: s.deadline_caveat,
-    take_upgrades: s.take_upgrades,
     value_score: valueScore,
     ai_hours: s.ai_hours,
     milestones,
@@ -525,13 +511,7 @@ export async function scoreOrder(
   const bidsCtx: ScoringContext = {
     bidsBalance: balance?.balance ?? null,
     nextBidInMinutes: balance?.nextBidInMinutes ?? null,
-    sponsoredLeft: null,
   };
-  try {
-    bidsCtx.sponsoredLeft = await sponsoredDailyLeft(env);
-  } catch (e) {
-    console.warn("scoreOrder: sponsored daily limit unavailable", String(e));
-  }
   const messages = [
     { role: "system", content: buildScoringSystemPrompt(cfg, buildProfilesBlock(env)) },
     { role: "user", content: buildScoringUserMessage(order, bidsCtx) },
@@ -567,17 +547,7 @@ export async function scoreOrder(
     raw: raw.slice(0, 500),
   });
 
-  const nativeBudget =
-    typeof order.budget_min_original === "number" &&
-    typeof order.budget_max_original === "number" &&
-    order.budget_max_original > 0;
-  const hintMin = nativeBudget ? order.budget_min_original : order.budget_min;
-  const hintMax = nativeBudget ? order.budget_max_original : order.budget_max;
-  const hintCurrency = nativeBudget ? order.currency_code : "USD";
-  const bidHint =
-    typeof hintMax === "number" && hintMax > 0
-      ? `If verdict is BID, bid_amount (in ${hintCurrency}) must be within [${hintMin * 0.5}, ${Math.min(hintMax * 1.5, 50000)}]; for PASS use 0 for bid_amount and delivery_days.`
-      : "For PASS use 0 for bid_amount and delivery_days.";
+  const bidHint = "If verdict is BID, bid_amount must be any positive number (the code sets the final bid); for PASS only verdict, profile, reason and summary_ru are required.";
   const retryMessages = [
     ...messages,
     { role: "assistant", content: raw },

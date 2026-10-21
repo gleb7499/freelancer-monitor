@@ -12,14 +12,12 @@ import { preBidRejectReason } from "./service";
 import { fetchProjectClient, fetchPortfolio, fetchOrderArtifacts } from "./enrich";
 import { scoreOrder, buildBidMessages, generateBidText, KimiError } from "./kimi";
 import { placeBid } from "./bidder";
-import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft } from "./upgrades";
 import {
   formatOrderCard,
   formatPassCard,
   formatRejectCard,
   sendTelegram,
   alert,
-  type ManualActions,
 } from "./telegram";
 import { log, logImportant, logError, heartbeat, flushLogBuffer } from "./logger";
 import { runWithConcurrency, bySubmitTsDesc } from "./util";
@@ -53,42 +51,6 @@ export function clampWeeklyLimit(score: ScoreResult, cfg: Config): void {
   if (score.weekly_limit_hours === null) return;
   const cap = Math.min(cfg.weeklyLimitHours, 40);
   score.weekly_limit_hours = Math.min(score.weekly_limit_hours, cap);
-}
-
-// Свежие ставки заказа: GET /bids/?projects[]={id} с той же логикой авторизации,
-// что в placeBid (OAuth либо Bearer). Слот sponsored свободен, если ни у одной
-// ставки нет sponsored=true. bids приходит списком или словарём (оба разбираем,
-// по образцу milestones.ts fetchMyBids). Ошибка/не-ok → null ("не проверен").
-async function fetchSponsoredSlotFree(
-  env: Env,
-  cfg: Config,
-  order: Order,
-): Promise<boolean | null> {
-  const authHeaders: Record<string, string> | null = cfg.flOauthToken
-    ? { "Freelancer-OAuth-V1": cfg.flOauthToken }
-    : cfg.flApiKey
-      ? { Authorization: `Bearer ${cfg.flApiKey}` }
-      : null;
-  if (!authHeaders) return null;
-  try {
-    const res = await fetch(`${cfg.freelancerBase}/bids/?projects[]=${order.id}`, {
-      headers: authHeaders,
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { status?: string; result?: { bids?: unknown } };
-    if (data.status !== "success") return null;
-    const bids = data.result?.bids;
-    const list: { sponsored?: boolean }[] = Array.isArray(bids)
-      ? (bids as { sponsored?: boolean }[])
-      : bids && typeof bids === "object"
-        ? (Object.values(bids) as { sponsored?: boolean }[])
-        : [];
-    return !list.some((b) => b && b.sponsored === true);
-  } catch (e) {
-    console.warn("fetchSponsoredSlotFree failed:", { id: order.id, err: String(e) });
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -767,37 +729,6 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
   const reservation = res.reservation;
 
   try {
-    // 6. Статус слота sponsored: один запрос bids на заказ — переиспользуется
-    // и фильтром плана ниже, и блоком ручных действий в карточке. Ошибка /
-    // не-ok → null ("не проверен"): слот как фактор не учитываем, но и не
-    // блокируем из-за него отклик.
-    const slotFree = await fetchSponsoredSlotFree(env, cfg, order);
-
-    // Философия sponsored (rules): код довыкидывает sponsored из плана LLM
-    // по жёстким фактам, которые модель видит хуже/позже. Неопределённость
-    // слота (null) — НЕ повод выкидывать: цена допа ограничена потолком 15%.
-    let sponsoredRemovedNote: string | undefined;
-    if (score.take_upgrades.includes("sponsored")) {
-      let reason: string | null = null;
-      if (order.bids <= 15) {
-        reason = "bids <= 15 (sponsored не нужен)";
-      } else if (slotFree === false) {
-        reason = "слот занят";
-      } else {
-        const left = await sponsoredDailyLeft(env);
-        if (left <= 0) reason = "лимит дня: 3 sponsored/сутки";
-      }
-      if (reason !== null) {
-        score.take_upgrades = score.take_upgrades.filter((u) => u !== "sponsored");
-        sponsoredRemovedNote = reason;
-      }
-    }
-
-    const cap = enforceUpgradeCap(score.take_upgrades, score.bid_amount, score.net_amount);
-    if (cap.removed.length > 0) {
-      score.take_upgrades = cap.kept;
-    }
-
     let bidText: string | null = null;
     try {
       const portfolio = await fetchPortfolio(env).catch((e) => {
@@ -841,29 +772,13 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
       }
     }
 
-    // Консоль действий в карточке: sealed покупает код автоматически (корзина),
-    // ручных действий по нему нет; ссылка на ставку — только если она реально
-    // размещена (в test-режиме bidId=null).
-    const manualActions: ManualActions | null =
-      score.take_upgrades.length > 0 || score.verdict === "BID"
-        ? {
-            bidId: bidResult.placed ? (bidResult.bidId ?? null) : null,
-            slotFree,
-            sponsoredPrice: priceUpgrades(["sponsored"], score.bid_amount)[0].label,
-            sponsoredRemovedNote,
-            test: mode === "test",
-          }
-        : null;
-
-    const card = formatOrderCard(order, score, bidText, manualActions);
+    const card = formatOrderCard(order, score, bidText);
     const sign = order.currency_sign ?? "$";
     let header: string;
     if (mode === "test") {
       header = `[TEST] ставка НЕ отправлена`;
     } else if (bidResult.placed) {
-      const upgradesPart =
-        score.take_upgrades.includes("sponsored") ? "sponsored" : "без апгрейдов";
-      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}, план апгрейдов: ${upgradesPart}`;
+      header = `✅ Отклик отправлен: ${sign}${score.bid_amount}`;
       if (bidResult.recovered) {
         header += `\n⚠️ ответ на запрос ставки не пришёл (обрыв), но ставка подтверждена сверкой на сайте`;
       }

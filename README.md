@@ -89,7 +89,6 @@ src/
   milestones.ts   — awarded-bid detection, milestone status polling (1/5 min)
   kimi.ts         — scoring + bid text via Kimi API (JSON-schema, retries)
   prompts.ts      — prompt assembly (rules injected from rules/*.md at build time)
-  upgrades.ts     — upgrade pricing/caps (sealed/sponsored, sponsored 3/day)
   payments.ts     — payment screens (sealed purchase via cart)
   order-context.ts— order message context (cards linked to orders)
   orderRate       — currency rate recovered from budget (in telegram.ts)

@@ -20,13 +20,14 @@ export interface ScoringPromptOptions {
   weeklyLimitHours: number;
   targetHourly: number;
   bidMinScore: number;
+  phaseMaxBids: number;
+  phaseBudgetFixedUsd: number;
+  phaseBudgetHourlyUsd: number;
 }
 
 export interface ScoringContext {
   bidsBalance: number | null;
   nextBidInMinutes: number | null;
-  // Остаток дневного лимита sponsored-покупок (null — KV недоступен).
-  sponsoredLeft: number | null;
 }
 
 // Правило проекта: промтовый текст не хранится inline — только в prompts/*.md.
@@ -55,6 +56,9 @@ export function buildScoringSystemPrompt(
     BID_MIN_SCORE: String(opts.bidMinScore),
     TARGET_HOURLY: String(opts.targetHourly),
     WEEKLY_LIMIT_HOURS: String(opts.weeklyLimitHours),
+    PHASE_MAX_BIDS: String(opts.phaseMaxBids),
+    PHASE_BUDGET_FIXED_USD: String(opts.phaseBudgetFixedUsd),
+    PHASE_BUDGET_HOURLY_USD: String(opts.phaseBudgetHourlyUsd),
   });
 }
 
@@ -91,7 +95,6 @@ export function buildScoringUserMessage(order: Order, ctx?: ScoringContext): str
     BIDS_BALANCE: ctx && ctx.bidsBalance !== null ? String(ctx.bidsBalance) : "unknown",
     NEXT_BID_MINUTES:
       ctx && ctx.nextBidInMinutes !== null ? String(ctx.nextBidInMinutes) : "unknown",
-    SPONSORED_LEFT: ctx && ctx.sponsoredLeft !== null ? String(ctx.sponsoredLeft) : "unknown",
   });
   // Число откликов LLM не передаём: конкуренцию решает кодовый гейт на входе
   // (>50 при появлении → rej:hot-competition), текущий счётчик секунд после
@@ -193,10 +196,6 @@ export const SCORING_JSON_SCHEMA = {
           additionalProperties: false,
         },
       },
-      take_upgrades: {
-        type: "array",
-        items: { type: "string", enum: ["sponsored"] },
-      },
     },
     required: [
       "verdict",
@@ -213,7 +212,6 @@ export const SCORING_JSON_SCHEMA = {
       "delivery_days",
       "deadline_caveat",
       "milestones",
-      "take_upgrades",
     ],
     additionalProperties: false,
   },

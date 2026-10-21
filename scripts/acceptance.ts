@@ -8,7 +8,6 @@ import { fetchSearchOrders, parseSearchBody } from "../src/sources/freelancer-se
 import { preBidRejectReason } from "../src/service";
 import { loadOrderContext, updateOrderContext } from "../src/order-context";
 import { formatOrderCard, formatPassCard } from "../src/telegram";
-import { enforceUpgradeCap, priceUpgrades, sponsoredDailyLeft, spendSponsored } from "../src/upgrades";
 import { isWithinSchedule, parseScheduleArgs, applyScheduleDelta, TIMEZONE_OFFSET_MS } from "../src/schedule";
 import { runWithConcurrency, bySubmitTsDesc } from "../src/index";
 import { buildBidBody, placeBid, parseApiError, findOwnBid } from "../src/bidder";
@@ -17,6 +16,7 @@ import { buySealedUpgrade } from "../src/payments";
 import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "../src/web-auth";
 import { alert as tgAlert } from "../src/telegram";
 import { isStaleOrder } from "../src/durable";
+import { buildScoringSystemPrompt, buildBidTextSystemPrompt, buildScoringUserMessage, HUMANIZE_SYSTEM_PROMPT } from "../src/prompts";
 import type { Order } from "../src/types";
 
 let pass = 0;
@@ -86,7 +86,6 @@ function makeScore(partial: Record<string, unknown>) {
     weekly_limit_hours: null,
     delivery_days: 5,
     deadline_caveat: null,
-    take_upgrades: ["sponsored"],
     profile: "main",
     ...partial,
   };
@@ -211,9 +210,6 @@ const cfg = {
   const oh = makeOrder({ type: "hourly", budget_min: 15, budget_max: 25, budget_min_original: 15, budget_max_original: 25 });
   const h = validateScore(makeScore({ milestones: valid }), oh);
   eq(h.some((e) => e.includes("must be null for hourly")), true, "milestones: hourly with array -> error");
-  // sealed в take_upgrades больше не выбирает LLM.
-  const sealed = validateScore(makeScore({ take_upgrades: ["sealed"] }), o);
-  eq(sealed.some((e) => e.includes("take_upgrades")), true, "validateScore rejects sealed in take_upgrades");
 }
 
 // ---------- C4. normalizeScore: план этапов (суммы, санитайз, фолбэк) ----------
@@ -316,14 +312,20 @@ const cfg = {
     budget_min_original: 12500, budget_max_original: 37500,
     currency_code: "INR",
   });
-  const bad = validateScore(makeScore({ bid_amount: 60000 }), o);
-  ok(bad.some((e) => e.includes("outside sanity range") && e.includes("INR")), "validateScore native sanity range");
+  // Сумму ставки задаёт код: проверка диапазона по бюджету снята (лишние ретраи).
+  const wide = validateScore(makeScore({ bid_amount: 60000 }), o);
+  eq(wide, [], "validateScore: bid_amount outside budget range is accepted (code sets the bid)");
+  const zeroBid = validateScore(makeScore({ bid_amount: 0 }), o);
+  ok(zeroBid.some((e) => e.includes("bid_amount")), "validateScore: BID needs positive bid_amount");
   const good = validateScore(makeScore({ bid_amount: 24000 }), o);
   eq(good, [], "validateScore accepts native bid in range");
   const passZeros = validateScore(makeScore({ verdict: "PASS", bid_amount: 0, net_amount: 0, delivery_days: 0, value_score: 0 }), o);
   eq(passZeros, [], "validateScore accepts PASS zeros");
-  const dup = validateScore(makeScore({ take_upgrades: ["sponsored", "sponsored"] }), o);
-  ok(dup.some((e) => e.includes("duplicates")), "validateScore rejects duplicate upgrades");
+  // PASS: достаточно verdict, profile, reason, summary_ru.
+  const minimalPass = validateScore({ verdict: "PASS", profile: "main", reason: "r", summary_ru: "s" }, o);
+  eq(minimalPass, [], "validateScore accepts minimal PASS");
+  const normPass = normalizeScore({ verdict: "PASS", profile: "main", reason: "r", summary_ru: "s" }, o, cfg);
+  eq([normPass.verdict, normPass.bid_amount, normPass.milestones, normPass.hours.real, normPass.red_flags], ["PASS", 0, null, 0, []], "normalizeScore fills PASS defaults");
   const noProfile = validateScore({ ...makeScore({}), profile: undefined }, o);
   ok(noProfile.some((e) => e.includes("profile")), "validateScore requires profile");
   const badProfile = validateScore(makeScore({ profile: "ios" }), o);
@@ -397,21 +399,6 @@ const cfg = {
   eq(isAwarded({ award_status: "pending" } as any), false, "not awarded: pending");
 }
 
-// ---------- K. enforceUpgradeCap (потолок 15% от ставки) ----------
-{
-  // bid 500: cap $75; sealed $0.10 + sponsored ~$3.75 — оба проходят.
-  const capped = enforceUpgradeCap(["sealed", "sponsored"], 500, 450);
-  eq(capped.kept.includes("sponsored"), true, "cap 15%: sponsored kept on $500 bid");
-  eq(capped.kept.includes("sealed"), true, "cap 15%: sealed kept on $500 bid");
-  // bid 30: cap $4.50; sponsored ~$1.90 + $0.10 = $2.00 <= 4.50 — проходит.
-  const small = enforceUpgradeCap(["sealed", "sponsored"], 30, 25);
-  eq(small.kept.includes("sponsored"), true, "cap 15%: sponsored ~$1.90 fits $4.50 cap");
-  // bid 10: cap $1.50; sponsored ~$1.90 + $0.10 = $2.00 > 1.50 — вырезается.
-  const tiny = enforceUpgradeCap(["sealed", "sponsored"], 10, 8);
-  eq(tiny.kept.includes("sponsored"), false, "cap 15%: sponsored cut on $10 bid");
-  eq(tiny.kept.includes("sealed"), true, "cap 15%: sealed survives cut");
-}
-
 // ---------- K3. schedule: окно откликов по Минску ----------
 {
   const s = { startMin: 480, endMin: 1200, enabled: true }; // 08:00–20:00
@@ -458,60 +445,15 @@ const cfg = {
   ok(d7.error !== null && d7.next === base, "sched: non-numeric preset rejected");
 }
 
-// ---------- K4. карточка: блок ручных действий ----------
+// ---------- K4. карточка ----------
 {
   const o = makeOrder({ id: 42 });
-  const score = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5, take_upgrades: ["sealed", "sponsored"] }), o, cfg);
+  const score = normalizeScore(makeScore({ bid_amount: 250, ai_hours: 5 }), o, cfg);
   const plain = formatOrderCard(o, score, "Bid text here.");
-  ok(!plain.includes("Ручные действия"), "card: no manual block without manualActions");
+  ok(!plain.includes("Ручные действия"), "card: no manual block (sponsored removed)");
   ok(!plain.includes("📝 Суть"), "card: summary line removed");
   ok(!plain.includes("🎯 Value"), "card: value line removed");
-  const withMa = formatOrderCard(o, score, "Bid text here.", {
-    bidId: 123,
-    slotFree: true,
-    sponsoredPrice: "sponsored ~$1.90",
-  });
-  ok(withMa.includes("Ручные действия"), "card: manual block present");
-  ok(!withMa.includes("/bid/"), "card: no bid link in manual block");
-  ok(withMa.includes("слот свободен"), "card: slot status free");
-  const removed = formatOrderCard(o, { ...score, take_upgrades: ["sealed"] }, "Bid.", {
-    bidId: null,
-    slotFree: false,
-    sponsoredPrice: "sponsored ~$1.90",
-    sponsoredRemovedNote: "слот занят",
-    test: true,
-  });
-  ok(removed.includes("не берём: слот занят"), "card: sponsored removal note");
-  ok(!removed.includes("/bid/"), "card: no bid link in test mode");
-  // Регрессия 09.10.2026: note с "<=" («bids <= 15») уходил в Telegram без
-  // экранирования → 400 «Unsupported start tag» и карточка терялась целиком.
-  const lt = formatOrderCard(o, { ...score, take_upgrades: ["sealed"] }, "Bid.", {
-    bidId: null,
-    slotFree: true,
-    sponsoredPrice: "sponsored ~$1.90",
-    sponsoredRemovedNote: "bids <= 15 (sponsored не нужен)",
-    test: true,
-  });
-  ok(!lt.includes("<="), "card: '<=' in removal note is escaped");
-  ok(lt.includes("bids &lt;= 15"), "card: escaped note content present");
-}
-
-// ---------- K5. sponsoredDailyLeft (mock KV) ----------
-async function testSponsoredDaily() {
-  const store = new Map<string, string>();
-  const env = {
-    ORDERS_KV: {
-      get: async (k: string) => store.get(k) ?? null,
-      put: async (k: string, v: string, _opts?: unknown) => void store.set(k, v),
-    },
-  } as any;
-  const day = Date.UTC(2026, 9, 8, 12, 0, 0); // 08.10.2026 15:00 Минска
-  eq(await sponsoredDailyLeft(env, day), 3, "sponsored: fresh day -> 3 left");
-  await spendSponsored(env, day);
-  eq(await sponsoredDailyLeft(env, day), 2, "sponsored: after spend -> 2 left");
-  await spendSponsored(env, day);
-  await spendSponsored(env, day);
-  eq(await sponsoredDailyLeft(env, day), 0, "sponsored: limit exhausted -> 0");
+  ok(plain.includes("Bid text here."), "card: bid text present");
 }
 
 // ---------- L. fetchProjectClient (mock fetch, закрытый users/0.1/users) ----------
@@ -1482,6 +1424,24 @@ async function testMilestonePolling() {
   globalThis.fetch = realFetch;
 }
 
+// ---------- V. промпты: нет неподставленных токенов, нет sponsored, нет известных противоречий ----------
+{
+  const sys = buildScoringSystemPrompt(cfg, "");
+  ok(!sys.includes("{{"), "prompt: scoring system has no unresolved tokens");
+  ok(!/sponsor/i.test(sys), "prompt: scoring system has no sponsored");
+  ok(!sys.includes("take_upgrades"), "prompt: scoring system has no take_upgrades");
+  ok(sys.includes("more than 15 bids") && sys.includes("$50 fixed") && sys.includes("$15 per hour"), "prompt: phase limits come from config");
+  ok(!sys.includes("Техника"), "prompt: technical section removed from selection rules");
+  ok(!sys.includes("under ~$100 net"), "prompt: no small-order exemption from milestones");
+  const user = buildScoringUserMessage(makeOrder({}), { bidsBalance: 5, nextBidInMinutes: 10 });
+  ok(!user.includes("{{") && !/sponsor/i.test(user), "prompt: scoring user message clean");
+  const bidSys = buildBidTextSystemPrompt("main");
+  ok(!bidSys.includes("{{"), "prompt: bid text system has no unresolved tokens");
+  ok(!bidSys.includes("120-250 words"), "prompt: no conflicting words limit");
+  ok(!HUMANIZE_SYSTEM_PROMPT.includes(";)"), "prompt: humanize has no ';)' emoticon");
+  ok(!HUMANIZE_SYSTEM_PROMPT.includes("INR 12,500"), "prompt: humanize has no bid-amount example");
+}
+
 // ---------- запуск ----------
 (async () => {
   await testClient();
@@ -1489,7 +1449,6 @@ async function testMilestonePolling() {
   await testArtifacts();
   await testOrderContext();
   await testConcurrencyPool();
-  await testSponsoredDaily();
   await testBidderPayments();
   await testSearchChannel();
   await testGenerateBidText();
