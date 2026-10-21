@@ -12,6 +12,7 @@ import {
   buildBidMilestonesNote,
   buildBidPriceNote,
   buildBidUserMessage,
+  bidTargetRange,
   buildHumanizeLimitMessage,
   buildProfilesBlock,
   buildBidTextSystemPrompt,
@@ -649,6 +650,7 @@ export function buildBidMessages(
         JSON.stringify(order),
         JSON.stringify(score),
         notes.join(""),
+        (order.description ?? "").trim().length,
       ),
     },
   ];
@@ -760,11 +762,32 @@ export async function generateBidText(
   } catch (e) {
     console.warn("generateBidText: save humanize failed:", String(e));
   }
+  // Мягкая проверка диапазона: текст заметно длиннее цели для этого ТЗ — одна
+  // переделка в том же диалоге (кэш), короткий ответ дёшев. Сбой не фатален.
+  const targetMax = bidTargetRange((order.description ?? "").trim().length).max;
+  if (text.length > targetMax + 150) {
+    conv.push({
+      role: "user",
+      content: buildHumanizeLimitMessage(text.length, BID_TEXT_MAX_CHARS, targetMax),
+    });
+    try {
+      const tighter = sanitizeBidText(await chat(env, conv, { tag: "humanize-target" }));
+      if (tighter.length > 0) {
+        text = tighter;
+        conv.push({ role: "assistant", content: text });
+      } else {
+        conv.pop();
+      }
+    } catch (e) {
+      conv.pop();
+      console.warn("generateBidText: target-length pass failed:", String(e));
+    }
+  }
   // Модель нарушила жёсткий лимит — прогоняем до 2 раз с указанием на нарушение.
   for (let attempt = 0; text.length > BID_TEXT_MAX_CHARS && attempt < 2; attempt++) {
     conv.push({
       role: "user",
-      content: buildHumanizeLimitMessage(text.length, BID_TEXT_MAX_CHARS),
+      content: buildHumanizeLimitMessage(text.length, BID_TEXT_MAX_CHARS, targetMax),
     });
     try {
       const shorter = sanitizeBidText(await chat(env, conv, { tag: "humanize-shorten" }));

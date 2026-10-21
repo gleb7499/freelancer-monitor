@@ -122,10 +122,22 @@ export const BID_TEXT_MAX_CHARS = 1500;
 // правила проекта в его конце). Ошибка этого вызова не фатальна — берём черновик.
 export const HUMANIZE_SYSTEM_PROMPT = fill(text(humanizeSystemMd), { RULES_HUMANIZE });
 
-export function buildHumanizeLimitMessage(charCount: number, maxChars: number): string {
+// Целевой диапазон длины отклика по размеру описания заказа (знаков).
+export function bidTargetRange(descLen: number): { min: number; max: number } {
+  if (descLen < 400) return { min: 600, max: 900 };
+  if (descLen < 1200) return { min: 900, max: 1200 };
+  return { min: 1200, max: 1400 };
+}
+
+export function buildHumanizeLimitMessage(
+  charCount: number,
+  maxChars: number,
+  targetMax: number = 1400,
+): string {
   return fill(text(humanizeLimitMd), {
     CHAR_COUNT: String(charCount),
     MAX_CHARS: String(maxChars),
+    TARGET_MAX: String(targetMax),
   });
 }
 
@@ -151,8 +163,21 @@ export function buildBidPriceNote(bidAmount: number, currency: string): string {
 }
 
 // Обёртка пользовательского сообщения генератора текста ставки.
-export function buildBidUserMessage(orderJson: string, scoreJson: string, notes: string): string {
-  return fill(text(bidUserMd), { ORDER_JSON: orderJson, SCORE_JSON: scoreJson, NOTES: notes });
+export function buildBidUserMessage(
+  orderJson: string,
+  scoreJson: string,
+  notes: string,
+  descLen: number = 0,
+): string {
+  const { min, max } = bidTargetRange(descLen);
+  return fill(text(bidUserMd), {
+    ORDER_JSON: orderJson,
+    SCORE_JSON: scoreJson,
+    NOTES: notes,
+    TARGET_MIN: String(min),
+    TARGET_MAX: String(max),
+    DESC_LEN: String(descLen),
+  });
 }
 
 export const SCORING_JSON_SCHEMA = {
