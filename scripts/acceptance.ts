@@ -16,7 +16,8 @@ import { buySealedUpgrade } from "../src/payments";
 import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "../src/web-auth";
 import { alert as tgAlert } from "../src/telegram";
 import { isStaleOrder } from "../src/durable";
-import { buildScoringSystemPrompt, buildBidTextSystemPrompt, buildScoringUserMessage, HUMANIZE_SYSTEM_PROMPT } from "../src/prompts";
+import { buildBidMilestonesNote } from "../src/prompts";
+import { bidTargetRange, buildBidUserMessage, buildScoringSystemPrompt, buildBidTextSystemPrompt, buildScoringUserMessage, HUMANIZE_SYSTEM_PROMPT } from "../src/prompts";
 import type { Order } from "../src/types";
 
 let pass = 0;
@@ -1176,6 +1177,28 @@ async function testGenerateBidText() {
   const r4 = await generateBidText(env, order, messages);
   eq(calls, 2, "bidtext: two thrown calls -> exactly two attempts");
   eq(r4, null, "bidtext: two exceptions -> null");
+
+  // 5) длина под ТЗ: цель в сообщении, перелёт -> одна переделка в том же диалоге.
+  eq(bidTargetRange(50), { min: 600, max: 900 }, "bidtext: sparse brief range");
+  eq(bidTargetRange(800), { min: 900, max: 1200 }, "bidtext: typical brief range");
+  eq(bidTargetRange(2000), { min: 1200, max: 1400 }, "bidtext: detailed brief range");
+  ok(
+    buildBidUserMessage("{}", "{}", "", 50).includes("Target bid length: 600-900"),
+    "bidtext: user message carries target range",
+  );
+  calls = 0;
+  const longText = "x".repeat(1300);
+  globalThis.fetch = (async () => {
+    calls++;
+    return reply(calls <= 2 ? longText : "Short enough.");
+  }) as any;
+  const r5 = await generateBidText(env, makeOrder({ id: 889, description: "tiny" }), messages);
+  eq(calls, 3, "bidtext: over-target text -> draft, humanize, one target pass");
+  eq(r5, "Short enough.", "bidtext: target pass result used");
+  ok(
+    /Do NOT describe the payment structure/.test(buildBidMilestonesNote()),
+    "bidtext: milestones note forbids payment structure in text",
+  );
 
   globalThis.fetch = realFetch;
 }

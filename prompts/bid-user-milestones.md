@@ -1,3 +1,1 @@
-
-Milestone plan (set by the scoring engine): the bid text MUST match this plan — do not invent other shares or stages. Payment structure to state as a fact, with the real shares and descriptions below, e.g. "Payment structure: 30% to start, then 70% on final delivery and handover." No justifications needed (the reasoning is covered elsewhere).
-{{MILESTONES_LINES}}
+Milestone payments are requested in the system automatically together with the bid and the client sees them in the proposal. Do NOT describe the payment structure, shares or stages in the bid text, and do not mention milestones at all (unless the client's brief explicitly asks to confirm them in the text).
