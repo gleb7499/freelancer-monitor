@@ -17,6 +17,7 @@ import { sendTelegram, setWebhook, setMyCommands, answerCallbackQuery, editMessa
 import { enforceUpgradeCap, priceUpgrades } from "./upgrades";
 import { checkMilestones } from "./milestones";
 import { getMode, setMode } from "./mode";
+import { clearAuthInvalid } from "./web-auth";
 import { getSchedule, setSchedule, isWithinSchedule, parseScheduleArgs, formatSchedule, applyScheduleDelta, type Schedule } from "./schedule";
 import { clampWeeklyLimit, channelRunnerStub, ordersBankStub, bidBudgetStub } from "./durable";
 
@@ -368,6 +369,8 @@ async function handleFlAuth(request: Request, env: Env): Promise<Response> {
       return jsonResponse({ error: "body must be {userId: string, hash: string}" }, 400);
     }
     await env.ORDERS_KV.put(AUTH_KV_KEY, JSON.stringify({ userId, hash }));
+    // Новая сессия: снимаем выключатель протухшей авторизации.
+    await clearAuthInvalid(env);
     log("fl.auth.override-set", {});
     return jsonResponse({ ok: true });
   }

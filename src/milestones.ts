@@ -183,7 +183,7 @@ export async function checkMilestones(
     const msg = String(e);
     if (msg.includes("HTTP 401")) {
       result.skipped.push({ bid_id: 0, reason: "oauth-invalid" });
-      await alert(env, "Milestones: авторизация отклонена (401)");
+      await alert(env, "Milestones: авторизация отклонена (401)", { key: "milestones-401" });
       return result;
     }
     throw e;

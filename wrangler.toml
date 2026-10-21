@@ -54,3 +54,5 @@ BID_MIN_SCORE = "10"
 PHASE_MAX_BIDS = "15"
 PHASE_BUDGET_FIXED_USD = "50"
 PHASE_BUDGET_HOURLY_USD = "15"
+# Заказы старше N минут не обрабатываются (после простоя берём только свежие).
+MAX_ORDER_AGE_MIN = "20"

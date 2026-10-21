@@ -23,6 +23,7 @@ import {
 } from "./telegram";
 import { log, logImportant, logError, heartbeat, flushLogBuffer } from "./logger";
 import { runWithConcurrency, bySubmitTsDesc } from "./util";
+import { isAuthInvalid, markAuthInvalid, clearAuthInvalid } from "./web-auth";
 
 // ---------------------------------------------------------------------------
 // Общие константы и помощники (перенос из бывшего index.ts без изменений логики)
@@ -37,10 +38,14 @@ const BIDS_UNSET_ALERT_KEY = "bids:unset-alerted";
 
 // Локальная копия механизма «алерт не чаще раза в TTL» (была в index.ts).
 async function sendAuthAlertOnce(env: Env, key: string, ttlSec: number, message: string): Promise<void> {
-  const already = await env.ORDERS_KV.get(key);
-  if (already !== null) return;
-  await env.ORDERS_KV.put(key, String(Date.now()), { expirationTtl: ttlSec });
-  await alert(env, message);
+  await alert(env, message, { key, ttlSec });
+}
+
+// Заказ старше cfg.maxOrderAgeMin минут (по submit_ts, unix сек). Неизвестное
+// время публикации (0) — не считаем старым.
+export function isStaleOrder(order: Order, cfg: Config, nowMs = Date.now()): boolean {
+  if (!(order.submit_ts > 0) || cfg.maxOrderAgeMin <= 0) return false;
+  return nowMs / 1000 - order.submit_ts > cfg.maxOrderAgeMin * 60;
 }
 
 // Потолок weekly limit для hourly: LLM может только снизить лимит.
@@ -279,6 +284,14 @@ export class ChannelRunner extends DurableObject<Env> {
       },
     };
 
+    // Выключатель: сессия протухла — в live не опрашиваем поиск и не тратим LLM
+    // (ставка упадёт на 401). feed продолжает опрос: он же проба восстановления.
+    if (id !== "feed" && mode === "live" && (await isAuthInvalid(env))) {
+      log("channel.paused-auth-invalid", { channel: id });
+      await flushLogBuffer(env);
+      return;
+    }
+
     const result =
       id === "feed"
         ? await fetchActiveOrders(env, state)
@@ -288,12 +301,7 @@ export class ChannelRunner extends DurableObject<Env> {
       await logError(env, "active.error", { channel: id, message: result.error });
       await this.ctx.storage.put("lastError", result.error);
       if (id === "feed" && result.error.includes("UNAUTHORIZED")) {
-        await sendAuthAlertOnce(
-          env,
-          "feed:unauth-alerted",
-          3600,
-          "Веб-авторизация Freelancer протухла (401) — обнови через /admin/fl-auth",
-        );
+        await markAuthInvalid(env, "feed");
       }
       await flushLogBuffer(env);
       return;
@@ -302,6 +310,11 @@ export class ChannelRunner extends DurableObject<Env> {
     if (result.skipped) {
       await flushLogBuffer(env);
       return;
+    }
+
+    if (id === "feed") {
+      // Лента ответила — сессия жива: снимаем флаг, поставленный самой лентой.
+      await clearAuthInvalid(env, { onlyFeed: true }).catch(() => false);
     }
 
     await this.ctx.storage.put("lastError", null);
@@ -644,6 +657,14 @@ export async function runOrderPipeline(env: Env, order: Order): Promise<void> {
   const freshness = await bank.checkAndMark(order.id, source, Date.now());
   if (freshness === "duplicate") {
     console.log(`pipeline.duplicate ${order.id} (${source})`);
+    return;
+  }
+
+  // Возраст заказа: после простоя берём только свежие (на старые уже куча
+  // откликов, LLM и bids на них не тратим).
+  if (isStaleOrder(order, cfg)) {
+    await bank.updateStatus(order.id, "rejected", "rej:stale");
+    console.log(`pipeline.stale ${order.id} (${source})`);
     return;
   }
 

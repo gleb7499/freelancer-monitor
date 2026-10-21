@@ -27,6 +27,8 @@ export function getConfig(env: Env) {
     phaseMaxBids: num(env, "PHASE_MAX_BIDS", 15),
     phaseBudgetFixedUsd: num(env, "PHASE_BUDGET_FIXED_USD", 50),
     phaseBudgetHourlyUsd: num(env, "PHASE_BUDGET_HOURLY_USD", 15),
+    // Максимальный возраст заказа на входе, минуты (0 — без ограничения).
+    maxOrderAgeMin: num(env, "MAX_ORDER_AGE_MIN", 20),
   };
 }
 
