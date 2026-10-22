@@ -1,13 +1,21 @@
 name: Deploy to Cloudflare Workers
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
 
+# Деплои идут строго по очереди; запущенный деплой не отменяем.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || 'deploy' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  deploy:
+  check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +28,23 @@ jobs:
       - run: npm run typecheck
       - run: npm run gen:rules
       - run: npm run acceptance
+
+  # Деплой только из main (push или ручной запуск) и только после зелёных проверок.
+  deploy:
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run gen:rules
 
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
