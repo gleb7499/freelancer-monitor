@@ -2,6 +2,8 @@ import type { Order, Env } from "./types";
 import { RULES_FREELANCER_SELECTION, RULES_BID_SKILL, RULES_HUMANIZE } from "./generated/rules";
 import scoringSystemMd from "../prompts/scoring-system.md";
 import scoringUserMd from "../prompts/scoring-user.md";
+import scoringGateOnMd from "../prompts/scoring-gate-on.md";
+import scoringGateOffMd from "../prompts/scoring-gate-off.md";
 import scoringRetryMd from "../prompts/scoring-retry.md";
 import bidTextSystemMd from "../prompts/bid-text-system.md";
 import bidUserMd from "../prompts/bid-user.md";
@@ -20,6 +22,7 @@ export interface ScoringPromptOptions {
   weeklyLimitHours: number;
   targetHourly: number;
   bidMinScore: number;
+  scoreGateEnabled: boolean;
   phaseMaxBids: number;
   phaseBudgetFixedUsd: number;
   phaseBudgetHourlyUsd: number;
@@ -53,7 +56,9 @@ export function buildScoringSystemPrompt(
   return fill(text(scoringSystemMd), {
     RULES_FREELANCER_SELECTION,
     PROFILES_BLOCK: profilesBlock,
-    BID_MIN_SCORE: String(opts.bidMinScore),
+    SCORE_GATE_RULES: fill(text(opts.scoreGateEnabled ? scoringGateOnMd : scoringGateOffMd), {
+      BID_MIN_SCORE: String(opts.bidMinScore),
+    }),
     TARGET_HOURLY: String(opts.targetHourly),
     WEEKLY_LIMIT_HOURS: String(opts.weeklyLimitHours),
     PHASE_MAX_BIDS: String(opts.phaseMaxBids),

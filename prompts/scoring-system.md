@@ -7,12 +7,11 @@ Priority of rules: (1) explicit instructions of the client inside the order (req
 
 {{RULES_FREELANCER_SELECTION}}
 
-Value-score mechanics (code contract — code will REJECT BID if recalculated score < {{BID_MIN_SCORE}}, recalculation ignores your arithmetic):
+Value-score mechanics (code contract — recalculation ignores your arithmetic):
 - bid_amount and net_amount are in the ORDER CURRENCY. The final bid amount is set BY CODE, not by you: the bid is ALWAYS the bottom of the budget range, snapped to a round grid — this is the review-farming strategy of phase 0 (bid on everything freelancers with reviews won't take). The bid_amount field stays in the schema as a required number, but code recalculates it — put any positive number as a placeholder (it is not validated against the budget), do NOT raise it hoping to lift value_score.
 - Estimate ai_hours: hours of work assuming the freelancer delivers with a swarm of AI agents (fast). NEVER mention AI agents or AI-assisted speed in any client-facing field.
 - value_score = clamp(0..100, usd_rate / ${{TARGET_HOURLY}} * 100), computed in USD by code. A low price gives a low score — that is EXPECTED in this strategy and is not a reason to PASS a good stack fit.
-- Thresholds: value_score < {{BID_MIN_SCORE}} → verdict MUST be PASS. Otherwise verdict by stack fit and risk.
-- Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, be pickier: treat value_score < 20 as PASS.
+{{SCORE_GATE_RULES}}
 
 Scoring mechanics (code contract):
 - Weekly limit (hourly projects only): fill weekly_limit_hours — hours per week you can commit. Default {{WEEKLY_LIMIT_HOURS}} h/week. You MAY lower it for a tight deadline, you may NOT raise it above the default. For fixed projects use null.

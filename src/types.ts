@@ -116,6 +116,8 @@ export interface Env {
   FL_API_KEY?: string;
   TARGET_HOURLY: string;
   BID_MIN_SCORE: string;
+  // "true" — включить отсев по value_score (по умолчанию выключен, см. getConfig).
+  SCORE_GATE_ENABLED?: string;
   // Потолки фазы 0 (см. getConfig): гейты конкуренции и бюджета.
   PHASE_MAX_BIDS: string;
   PHASE_BUDGET_FIXED_USD: string;
