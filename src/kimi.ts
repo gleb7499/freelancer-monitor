@@ -456,7 +456,16 @@ export function normalizeScore(
     }
   }
   let verdict: "BID" | "PASS" = s.verdict;
-  if (verdict === "BID" && valueScore < cfg.bidMinScore) {
+  // ВРЕМЕННО (cfg.scoreGateEnabled=false): порог не блокирует отклик, чтобы набрать
+  // первые отзывы; score считается и логируется как обычно.
+  if (verdict === "BID" && valueScore < cfg.bidMinScore && !cfg.scoreGateEnabled) {
+    console.info("scoreOrder: value_score below threshold, gate disabled", {
+      id: order.id,
+      valueScore,
+      bidMinScore: cfg.bidMinScore,
+    });
+  }
+  if (cfg.scoreGateEnabled && verdict === "BID" && valueScore < cfg.bidMinScore) {
     const scoreBefore = valueScore;
     console.warn("scoreOrder: BID force-passed by code recheck", {
       id: order.id,

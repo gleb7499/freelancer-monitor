@@ -50,6 +50,9 @@ FREELANCER_API_BASE = "https://www.freelancer.com/api/projects/0.1"
 DEFAULT_WEEKLY_LIMIT = "40"
 TARGET_HOURLY = "20"
 BID_MIN_SCORE = "10"
+# ВРЕМЕННО выключено ради первых отзывов: отклик на все BID модели независимо от
+# value_score. "true" возвращает отсев по BID_MIN_SCORE.
+SCORE_GATE_ENABLED = "false"
 # Потолки фазы 0 (первые отзывы): гейты конкуренции и бюджета.
 PHASE_MAX_BIDS = "15"
 PHASE_BUDGET_FIXED_USD = "50"

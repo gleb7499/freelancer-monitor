@@ -1,0 +1,2 @@
+- Thresholds: value_score < {{BID_MIN_SCORE}} → verdict MUST be PASS; code will REJECT such a BID. Otherwise verdict by stack fit and risk.
+- Low bids balance context (from user message): if bids_balance is 1–2 and next_bid_in_minutes is large, be pickier: treat value_score < 20 as PASS.

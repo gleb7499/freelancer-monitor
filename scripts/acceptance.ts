@@ -95,6 +95,7 @@ function makeScore(partial: Record<string, unknown>) {
 const cfg = {
   targetHourly: 20,
   bidMinScore: 10,
+  scoreGateEnabled: true,
   weeklyLimitHours: 40,
   // Потолки фазы 0 (как в wrangler.toml).
   phaseMaxBids: 15,
@@ -283,6 +284,14 @@ const cfg = {
     r.reason.includes("[код: value_score=") && r.reason.includes("< 10"),
     "force-pass reason carries code note",
   );
+}
+
+// ---------- E1. отсев по score выключен: BID не блокируется, score считается ----------
+{
+  const o = makeOrder({ budget_min: 0, budget_max: 0, budget_min_original: 0, budget_max_original: 0 });
+  const r = normalizeScore(makeScore({ bid_amount: 200, ai_hours: 100 }), o, { ...cfg, scoreGateEnabled: false });
+  eq(r.verdict, "BID", "gate off: low score does not block BID");
+  ok(r.value_score > 0 && r.value_score < 10, "gate off: value_score still computed");
 }
 
 // ---------- E2. hourly value_score: ставка уже часовая, ai_hours не делим ----------

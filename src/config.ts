@@ -23,6 +23,10 @@ export function getConfig(env: Env) {
     flApiKey: (env.FL_API_KEY ?? "").trim(),
     targetHourly: num(env, "TARGET_HOURLY", 20),
     bidMinScore: num(env, "BID_MIN_SCORE", 30),
+    // ВРЕМЕННО: отсев по value_score/BID_MIN_SCORE выключен, чтобы откликаться на
+    // всё, что одобрила модель, и набрать первые отзывы. Расчёт и лог score
+    // остаются. Вернуть отсев: SCORE_GATE_ENABLED = "true" в wrangler.toml.
+    scoreGateEnabled: String(env.SCORE_GATE_ENABLED ?? "").trim().toLowerCase() === "true",
     // Потолки фазы 0: конкуренция и бюджет (USD; для почасовых — ставка/ч).
     phaseMaxBids: num(env, "PHASE_MAX_BIDS", 15),
     phaseBudgetFixedUsd: num(env, "PHASE_BUDGET_FIXED_USD", 50),

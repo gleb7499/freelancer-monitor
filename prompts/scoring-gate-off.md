@@ -1,0 +1,1 @@
+- value_score does NOT affect the verdict (temporary, to collect first reviews). This OVERRIDES any "threshold" or "low bids balance / value_score < 20" rule in the selection rules above: never PASS because of a low value_score or a low bids balance. Decide only by stack fit and risk.
