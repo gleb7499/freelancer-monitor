@@ -162,7 +162,9 @@ const cfg = {
   eq(normalizeScore(makeScore({ bid_amount: 99 }), oh, cfg).bid_amount, 15, "price hourly: no bids -> bottom");
   eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh, bid_avg: 30 }, cfg).bid_amount, 15, "price hourly: bid_avg ignored -> bottom 15");
   const oh2 = makeOrder({ type: "hourly", budget_min: 12, budget_max: 25, budget_min_original: 12, budget_max_original: 25 });
-  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 10, "price hourly: bid_avg ignored -> snap 10");
+  eq(normalizeScore(makeScore({ bid_amount: 99 }), { ...oh2, bid_avg: 20 }, cfg).bid_amount, 12, "price hourly: grid snap below min -> min 12");
+  const oh3 = makeOrder({ type: "hourly", budget_min: 2, budget_max: 8, budget_min_original: 2, budget_max_original: 8 });
+  eq(normalizeScore(makeScore({ bid_amount: 5 }), oh3, cfg).bid_amount, 2, "price hourly: min 2 never snaps to 0");
 }
 
 // ---------- C3. план этапов: валидация LLM-плана ----------
