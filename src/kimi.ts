@@ -354,6 +354,11 @@ export function normalizeScore(
       target = order.budget_min_original;
     }
     bid = roundBid(target);
+    // Сетка может округлить вниз ниже минимума заказа (например $2 → $0 при шаге 5);
+    // платформа отклоняет ставку ниже нижней границы бюджета — держим не ниже неё.
+    if (order.budget_min_original > 0 && bid < order.budget_min_original) {
+      bid = order.budget_min_original;
+    }
     // Sanity-кап: не выше 150% верха вилки (страховка, в норме не срабатывает).
     if (order.budget_max_original > 0) {
       const cap = order.budget_max_original * 1.5;

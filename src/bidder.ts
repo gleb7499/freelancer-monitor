@@ -93,6 +93,11 @@ export async function placeBid(
     return { placed: false, reason: "test-mode" };
   }
 
+  if (!(score.bid_amount > 0)) {
+    console.error("bidder.invalid-amount", { id: order.id, amount: score.bid_amount });
+    return { placed: false, reason: "invalid-amount" };
+  }
+
   const cfg = getConfig(env);
   const webAuth = await resolveWebAuth(env);
   // Фолбэк — только когда веб-сессии нет вообще.
